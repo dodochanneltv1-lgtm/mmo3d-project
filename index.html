@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aethelgard Chronicles - 3D Reshade Anime MMORPG</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+
+  <!-- 3D Viewport & Floating Layers -->
+  <div id="canvas-container"></div>
+  <div id="world-labels-layer"></div>
+  <div id="dmg-layer"></div>
+
+  <!-- เป้าเล็ง Crosshair สำหรับโหมดมุมมองบุคคลที่ 3 และ 1 (หันตามเมาส์อัตโนมัติ) -->
+  <div id="fps-crosshair" class="hidden fixed inset-0 pointer-events-none z-30 flex items-center justify-center">
+    <div class="w-6 h-6 relative flex items-center justify-center">
+      <div class="w-1.5 h-1.5 rounded-full bg-amber-400 shadow-[0_0_8px_#fbbf24]"></div>
+      <div class="absolute w-5 h-[1.5px] bg-white/70"></div>
+      <div class="absolute h-5 w-[1.5px] bg-white/70"></div>
+    </div>
+    <div class="fixed top-14 left-1/2 -translate-x-1/2 bg-slate-950/85 border border-amber-400/40 px-3.5 py-1 rounded-full text-[11px] text-amber-200 shadow-lg">
+      🎯 โหมดหันตามเมาส์อัตโนมัติ (คลิกซ้าย = โจมตีคอมโบ | กด <b>ESC</b> เพื่อแสดงเคอร์เซอร์เมาส์ | กด <b>V</b> เปลี่ยนมุมกล้อง)
+    </div>
+  </div>
+
+  <!-- Tooltip ลอยตามเมาส์เวลาชี้หรือคลิกลากดัดสัดส่วนบนตัวละคร 3D -->
+  <div id="sculpt-hover-tooltip" class="hidden fixed z-50 pointer-events-none px-3 py-1.5 rounded-xl bg-slate-950/90 border border-amber-400 text-xs text-amber-200 shadow-xl"></div>
+
+  <!-- Top Center Status Bar: เวลา, สภาพอากาศตามธรรมชาติ, มุมกล้อง 4 โหมด, ฟิลเตอร์ Reshade -->
+  <div class="fixed top-2 left-1/2 -translate-x-1/2 z-40 flex flex-wrap items-center justify-center gap-2 pointer-events-auto">
+    <div id="clock-badge" class="glass px-3 py-1 rounded-full text-[11px] flex items-center gap-1.5 border border-amber-400/30">
+      <span id="time-icon">☀️</span>
+      <span id="time-text" class="font-mono font-bold text-amber-300">08:00 น.</span>
+    </div>
+    <div id="weather-badge" class="glass px-2.5 py-1 rounded-full text-[11px] flex items-center gap-1 border border-sky-400/30">
+      <span id="weather-icon">🌤️</span>
+      <span id="weather-text" class="text-sky-200">อากาศ: แจ่มใส</span>
+    </div>
+    <button id="btn-camera-mode" class="glass px-3 py-1 rounded-full text-[11px] hover:bg-slate-800 transition flex items-center gap-1 border border-emerald-400/40 text-emerald-200 font-semibold">
+      🎥 มุมกล้อง [V]: <span id="camera-mode-label" class="text-amber-300">2.5D (คลิกขวาหมุน)</span>
+    </button>
+    <button id="btn-reshade-mode" class="glass px-2.5 py-1 rounded-full text-[11px] hover:bg-slate-800 transition flex items-center gap-1 border border-purple-400/40 text-purple-200">
+      ✨ ฟิลเตอร์ภาพ: <span id="reshade-label" class="font-bold text-amber-300">Anime Cel-Depth</span>
+    </button>
+    <div class="glass px-2.5 py-1 rounded-full text-[11px] flex items-center gap-1.5">
+      <span id="rtdb-dot" class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+      <span id="rtdb-text">RTDB</span>
+    </div>
+    <button id="btn-audio-toggle" class="glass px-2.5 py-1 rounded-full text-[11px] hover:bg-slate-800 transition flex items-center gap-1 border border-amber-400/30">
+      <span id="audio-icon">🔊</span> <span id="audio-label">เสียง</span>
+    </button>
+  </div>
+
+  <!-- ================= 1. หน้าล็อคอิน / สร้างบัญชี ================= -->
+  <div id="screen-auth" class="fixed inset-0 z-40 flex items-center justify-center p-4 bg-slate-950/80">
+    <div class="glass gold-border rounded-2xl w-full max-w-md p-7">
+      <div class="text-center mb-5">
+        <div class="inline-block px-3 py-1 rounded-full bg-amber-500/20 border border-amber-400/40 text-amber-300 text-xs font-semibold mb-2">
+          UNREAL BLOOM RESHADE • LIVING CITIES • FARMING & INVENTORY
+        </div>
+        <h1 class="text-3xl font-extrabold bg-gradient-to-r from-amber-200 via-amber-400 to-orange-400 bg-clip-text text-transparent">
+          AETHELGARD CHRONICLES
+        </h1>
+        <p class="text-xs text-slate-300 mt-1">4 มุมกล้อง • มหานครมีชีวิตชีวา • ระบบฟาร์มวัตถุดิบ & กระเป๋าไอเทม</p>
+      </div>
+
+      <div class="space-y-3.5">
+        <div>
+          <label class="block text-xs text-slate-300 mb-1">ชื่อผู้ใช้ (Username [Primary Key])</label>
+          <input id="auth-user" type="text" placeholder="เช่น admin, kongfa, hero01" class="w-full bg-slate-900/90 border border-slate-700 focus:border-amber-400 rounded-xl px-3.5 py-2.5 text-sm outline-none" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-300 mb-1">รหัสผ่าน (Password)</label>
+          <input id="auth-pass" type="password" placeholder="••••••••" class="w-full bg-slate-900/90 border border-slate-700 focus:border-amber-400 rounded-xl px-3.5 py-2.5 text-sm outline-none" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-300 mb-1">World Seed (ผู้เล่นที่ใช้ Seed เดียวกันจะเจอกันในแมพเดียวกัน!)</label>
+          <input id="auth-seed" type="text" value="AETHELGARD-RP-01" class="w-full bg-slate-900/90 border border-slate-700 focus:border-emerald-400 rounded-xl px-3.5 py-2 text-xs text-emerald-300 font-mono outline-none" />
+        </div>
+
+        <div id="auth-msg" class="text-xs text-center min-h-[18px] text-amber-300"></div>
+
+        <div class="grid grid-cols-2 gap-3 pt-1">
+          <button id="btn-login" class="bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-bold py-2.5 rounded-xl text-sm shadow-lg transition">
+            เข้าสู่ระบบ
+          </button>
+          <button id="btn-register" class="bg-slate-800 hover:bg-slate-700 border border-amber-400/40 text-amber-300 font-semibold py-2.5 rounded-xl text-sm transition">
+            สร้างบัญชีใหม่
+          </button>
+        </div>
+
+        <button id="btn-quickplay" class="w-full bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-400/40 text-emerald-200 py-2 rounded-xl text-xs font-medium transition">
+          ⚡ เข้าเล่นด่วน (ทดสอบกราฟิก Reshade และระบบใหม่ทันที)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 2. หน้าสร้างและดัดสัดส่วนโมเดล 3D ================= -->
+  <div id="screen-creator" class="hidden fixed inset-0 z-30 pointer-events-none flex items-stretch justify-between p-3 pt-12">
+    <!-- Left Panel: Identity, Gender, Class & Animations -->
+    <div class="pointer-events-auto glass rounded-2xl p-3.5 w-80 max-h-full overflow-y-auto custom-scroll flex flex-col gap-2.5">
+      <div class="flex items-center justify-between border-b border-slate-700/80 pb-2">
+        <span class="text-sm font-extrabold text-amber-300">✨ ข้อมูล & อาชีพ</span>
+        <span id="clicked-part-badge" class="text-[10px] bg-amber-500/20 border border-amber-400/40 text-amber-200 px-2 py-0.5 rounded-full">
+          ชี้แล้วลากดัดที่ตัวละครได้!
+        </span>
+      </div>
+
+      <div>
+        <label class="text-[11px] text-slate-300 font-semibold">เพศและโครงสร้างสรีระพื้นฐาน</label>
+        <div class="grid grid-cols-2 gap-1.5 mt-1">
+          <button id="btn-gender-female" class="py-2 rounded-xl text-xs font-bold border transition bg-pink-500/30 border-pink-400 text-pink-200">
+            ♀️ หญิง (เอวคอด/สะโพกมน)
+          </button>
+          <button id="btn-gender-male" class="py-2 rounded-xl text-xs font-bold border transition bg-slate-900 border-slate-700 text-slate-300">
+            ♂️ ชาย (ไหล่กว้าง/อกแกร่ง)
+          </button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="text-[11px] text-slate-300 font-semibold">ชื่อตัวละคร</label>
+          <input id="char-name-input" type="text" value="AethelHero" class="w-full mt-0.5 bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-1.5 text-xs text-amber-200 outline-none focus:border-amber-400" />
+        </div>
+        <div>
+          <label class="text-[11px] text-slate-300 font-semibold">ฉายา Roleplay</label>
+          <input id="char-title-input" type="text" value="นักผจญภัยพเนจร" class="w-full mt-0.5 bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-1.5 text-xs text-emerald-300 outline-none focus:border-emerald-400" />
+        </div>
+      </div>
+
+      <div>
+        <div class="text-[11px] text-amber-300 font-semibold mb-1">เลือกอาชีพเริ่มต้น (6 คลาส)</div>
+        <div id="class-list" class="grid grid-cols-2 gap-1"></div>
+      </div>
+
+      <div class="bg-slate-900/90 border border-slate-700/80 rounded-xl p-2.5 text-xs space-y-1">
+        <div class="flex justify-between items-center">
+          <span id="class-title" class="font-bold text-amber-300 text-xs">นักดาบ</span>
+          <span id="class-weapon-rule" class="text-[10px] bg-slate-800 px-2 py-0.5 rounded text-emerald-300">อาวุธ: ดาบ</span>
+        </div>
+        <p id="class-desc" class="text-slate-300 text-[10px] leading-relaxed"></p>
+        <div id="class-stats-preview" class="grid grid-cols-3 gap-1 pt-1 text-[10px] text-slate-200"></div>
+      </div>
+
+      <div>
+        <div class="text-[11px] text-amber-300 font-semibold mb-1">เลือกอาวุธประจำตัว</div>
+        <div id="weapon-select-list" class="grid grid-cols-2 gap-1"></div>
+        <p id="weapon-hint" class="text-[10px] text-slate-400 mt-1"></p>
+      </div>
+
+      <div>
+        <div class="text-[11px] text-slate-300 mb-1">ทดสอบท่าอนิเมชั่น</div>
+        <div class="grid grid-cols-3 gap-1 text-[10px]">
+          <button data-anim="idle" class="anim-preview-btn bg-amber-500/30 border border-amber-400/50 rounded-lg py-1">ยืน</button>
+          <button data-anim="walk" class="anim-preview-btn bg-slate-800 hover:bg-slate-700 rounded-lg py-1">วิ่ง</button>
+          <button data-anim="attack" class="anim-preview-btn bg-slate-800 hover:bg-slate-700 rounded-lg py-1">คอมโบ</button>
+          <button data-anim="harvest" class="anim-preview-btn bg-slate-800 hover:bg-slate-700 rounded-lg py-1">ฟาร์มของ</button>
+          <button data-anim="dance" class="anim-preview-btn bg-slate-800 hover:bg-slate-700 rounded-lg py-1">เต้น RP</button>
+          <button data-anim="sit" class="anim-preview-btn bg-slate-800 hover:bg-slate-700 rounded-lg py-1">นั่ง RP</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center Bottom Floating Camera & Direct-Sculpt Bar -->
+    <div class="pointer-events-none flex-1 flex flex-col justify-end items-center pb-1 px-2">
+      <div class="pointer-events-auto glass gold-border px-4 py-2 rounded-2xl flex flex-wrap items-center justify-center gap-2 text-xs shadow-2xl">
+        <button id="btn-sculpt-toggle" class="px-3 py-1.5 rounded-xl bg-amber-500 text-slate-950 font-extrabold text-xs shadow">
+          ✋ โหมดคลิกลากดัดสัดส่วนบนตัวละคร: เปิด
+        </button>
+        <button id="btn-cam-body" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-[11px]">เต็มตัว</button>
+        <button id="btn-cam-chest" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-[11px]">ส่องลำตัว/เอว</button>
+        <button id="btn-cam-face" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-[11px]">ส่องใบหน้า/ผม</button>
+        <button id="btn-random-char" class="px-2.5 py-1.5 rounded-xl bg-indigo-600/50 hover:bg-indigo-500/60 border border-indigo-400/50 text-indigo-100 text-[11px]">🎲 สุ่ม</button>
+        <div class="w-full text-center text-[10px] text-slate-300 pt-0.5">
+          💡 <b class="text-amber-300">คลิกซ้ายลากที่ตัวละคร</b> = ดึงความยาว/ดัดส่วนโค้ง | <b class="text-sky-300">คลิกขวาลาก (หรือลากพื้นว่าง)</b> = หมุน 360° | <b class="text-emerald-300">Shift+ลาก</b> = เลื่อนขึ้น-ลง | <b class="text-pink-300">ลูกกลิ้ง</b> = ซูม
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Panel: Detailed Sliders & Outfit Layers -->
+    <div class="pointer-events-auto glass rounded-2xl p-3.5 w-88 max-h-full overflow-y-auto custom-scroll flex flex-col gap-2.5">
+      <div class="flex flex-wrap gap-1 border-b border-slate-700 pb-2" id="creator-tabs">
+        <button data-tab="body" class="part-chip active text-[11px] px-2 py-1 rounded-lg border border-slate-700">1.สรีระ/อก/เอว/สะโพก</button>
+        <button data-tab="face" class="part-chip text-[11px] px-2 py-1 rounded-lg border border-slate-700">2.ใบหน้า/ตาอนิเมะ</button>
+        <button data-tab="hair" class="part-chip text-[11px] px-2 py-1 rounded-lg border border-slate-700">3.ดัดทรงผม/ความยาว</button>
+        <button data-tab="outfit" class="part-chip text-[11px] px-2 py-1 rounded-lg border border-slate-700">4.ชุดเต็มตัว/แยกชิ้น</button>
+        <button data-tab="extra" class="part-chip text-[11px] px-2 py-1 rounded-lg border border-slate-700">5.ผ้าคลุม/ปีก/อาวุธ</button>
+      </div>
+
+      <div id="creator-tab-content" class="space-y-2.5 text-xs flex-1 overflow-y-auto custom-scroll pr-1"></div>
+
+      <button id="btn-start-game" class="w-full bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 font-extrabold py-2.5 rounded-xl text-sm shadow-xl transition">
+        ⚔️ บันทึกตัวละครและเข้าสู่โลก Open World
+      </button>
+    </div>
+  </div>
+
+  <!-- ================= 3. หน้าจอขณะเล่นจริง (IN-GAME HUD) ================= -->
+  <div id="screen-hud" class="hidden fixed inset-0 z-20 pointer-events-none">
+    <!-- Top Left: Player Status Card (HP, MP, STAMINA, EXP) -->
+    <div class="pointer-events-auto fixed top-3 left-3 glass gold-border rounded-2xl p-3.5 w-80">
+      <div class="flex items-center justify-between mb-1.5">
+        <div>
+          <div class="flex items-center gap-1.5">
+            <span id="hud-level" class="bg-amber-500 text-slate-950 font-extrabold text-xs px-2 py-0.5 rounded-md">Lv.1</span>
+            <span id="hud-name" class="font-bold text-sm text-white">Hero</span>
+            <span id="hud-rp-title" class="text-[10px] bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 px-1.5 py-0.5 rounded">นักผจญภัย</span>
+          </div>
+          <div id="hud-class" class="text-[11px] text-amber-300 mt-0.5">อาชีพ: นักดาบ | อาวุธ: ดาบอัศวิน</div>
+        </div>
+        <div class="text-right">
+          <div class="text-amber-300 font-bold text-xs">🪙 <span id="hud-gold">300</span> G</div>
+          <div id="hud-water-state" class="text-[10px] text-emerald-300">🏃 อยู่บนบก</div>
+        </div>
+      </div>
+
+      <!-- HP Bar -->
+      <div class="mb-1">
+        <div class="flex justify-between text-[10px] mb-0.5"><span class="text-rose-300 font-semibold">HP</span><span id="hud-hp-text">170 / 170</span></div>
+        <div class="w-full h-2.5 bg-slate-900 rounded-full overflow-hidden border border-slate-700">
+          <div id="hud-hp-bar" class="h-full bg-gradient-to-r from-rose-600 to-red-400 transition-all duration-200" style="width:100%"></div>
+        </div>
+      </div>
+      <!-- MANA Bar -->
+      <div class="mb-1">
+        <div class="flex justify-between text-[10px] mb-0.5"><span class="text-sky-300 font-semibold">MANA</span><span id="hud-mp-text">65 / 65</span></div>
+        <div class="w-full h-2 bg-slate-900 rounded-full overflow-hidden border border-slate-700">
+          <div id="hud-mp-bar" class="h-full bg-gradient-to-r from-blue-600 to-cyan-400 transition-all duration-200" style="width:100%"></div>
+        </div>
+      </div>
+      <!-- STAMINA Bar (สำหรับกด Shift วิ่งไว & กลิ้งหลบ) -->
+      <div class="mb-1">
+        <div class="flex justify-between text-[10px] mb-0.5"><span class="text-emerald-300 font-semibold">STAMINA (วิ่ง Shift)</span><span id="hud-stamina-text">100 / 100</span></div>
+        <div class="w-full h-2 bg-slate-900 rounded-full overflow-hidden border border-slate-700">
+          <div id="hud-stamina-bar" class="h-full bg-gradient-to-r from-emerald-500 to-lime-400 transition-all duration-150" style="width:100%"></div>
+        </div>
+      </div>
+      <!-- EXP Bar -->
+      <div>
+        <div class="flex justify-between text-[10px] mb-0.5"><span class="text-amber-300 font-semibold">EXP</span><span id="hud-exp-text">0 / 100</span></div>
+        <div class="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden">
+          <div id="hud-exp-bar" class="h-full bg-amber-400 transition-all duration-200" style="width:0%"></div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-4 gap-1 mt-2 pt-1.5 border-t border-slate-700/80 text-[10px] text-center">
+        <div>ATK: <b id="hud-atk" class="text-amber-300">26</b></div>
+        <div>MATK: <b id="hud-matk" class="text-sky-300">10</b></div>
+        <div>DEF: <b id="hud-def" class="text-emerald-300">16</b></div>
+        <div>SPD: <b id="hud-spd" class="text-purple-300">12</b></div>
+      </div>
+    </div>
+
+    <!-- Top Center: Target Monster & Combo Queue Bar -->
+    <div id="hud-target-box" class="hidden fixed top-12 left-1/2 -translate-x-1/2 glass rounded-2xl px-5 py-2 w-80 border border-rose-500/40 text-center">
+      <div class="flex justify-between items-center text-xs mb-1">
+        <span id="target-name" class="font-bold text-rose-300">สไลม์วารี</span>
+        <span id="target-lv" class="text-[11px] text-slate-300">Lv.1</span>
+      </div>
+      <div class="w-full h-2.5 bg-slate-950 rounded-full overflow-hidden border border-slate-700">
+        <div id="target-hp-bar" class="h-full bg-gradient-to-r from-rose-600 to-orange-400 transition-all duration-150" style="width:100%"></div>
+      </div>
+      <div class="flex justify-between items-center text-[10px] text-slate-300 mt-0.5">
+        <span id="target-hp-text">90 / 90</span>
+        <span id="combo-badge" class="text-amber-300 font-extrabold">COMBO x1</span>
+      </div>
+    </div>
+
+    <!-- Farming Progress Bar (แสดงเมื่อกำลังขุดแร่/เก็บสมุนไพร/ตัดไม้) -->
+    <div id="hud-gather-box" class="hidden fixed top-28 left-1/2 -translate-x-1/2 glass gold-border rounded-2xl px-5 py-2.5 w-72 text-center">
+      <div id="gather-title" class="text-xs font-bold text-amber-300 mb-1">⛏️ กำลังเก็บเกี่ยวทรัพยากร...</div>
+      <div class="w-full h-2.5 bg-slate-950 rounded-full overflow-hidden border border-slate-700">
+        <div id="gather-bar" class="h-full bg-gradient-to-r from-amber-400 to-emerald-400 transition-all duration-75" style="width:0%"></div>
+      </div>
+    </div>
+
+    <!-- Right Side: Minimap + Town Teleport + Quests + Roleplay Emotes -->
+    <div class="pointer-events-auto fixed top-3 right-3 flex flex-col gap-2 w-64">
+      <div class="glass rounded-2xl p-2.5 flex flex-col items-center">
+        <div class="w-full flex justify-between items-center text-[11px] mb-1 px-1">
+          <span id="hud-biome" class="font-bold text-amber-300 truncate">📍 มหานครเอเธลการ์ด</span>
+          <span id="hud-coords" class="font-mono text-[10px] text-slate-300">0,0</span>
+        </div>
+        <canvas id="minimap-canvas" width="215" height="135" class="rounded-xl border border-slate-700 bg-slate-950"></canvas>
+        <div class="w-full mt-2">
+          <div class="text-[10px] text-slate-300 mb-1">วาร์ปไปมหานครทั้ง 4 เมือง:</div>
+          <div class="grid grid-cols-2 gap-1 text-[10px]">
+            <button data-town="0" class="town-warp-btn bg-slate-800 hover:bg-amber-500/30 border border-slate-600 rounded px-1.5 py-1 text-left truncate">🏰 1.นครเอเธลการ์ด</button>
+            <button data-town="1" class="town-warp-btn bg-slate-800 hover:bg-emerald-500/30 border border-slate-600 rounded px-1.5 py-1 text-left truncate">🌲 2.นครซิลแวนเวล</button>
+            <button data-town="2" class="town-warp-btn bg-slate-800 hover:bg-orange-500/30 border border-slate-600 rounded px-1.5 py-1 text-left truncate">🌋 3.ป้อมไพร์โฮลด์</button>
+            <button data-town="3" class="town-warp-btn bg-slate-800 hover:bg-cyan-500/30 border border-slate-600 rounded px-1.5 py-1 text-left truncate">❄️ 4.ท่าฟรอสต์เฮเวน</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Guild Quest Box -->
+      <div class="glass rounded-2xl p-2.5 text-xs">
+        <div class="flex items-center justify-between mb-1">
+          <span class="font-bold text-amber-300">📜 ภารกิจกิลด์นักผจญภัย</span>
+          <span id="quest-status-badge" class="text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-200">เควส #1</span>
+        </div>
+        <div id="quest-title" class="font-semibold text-white text-[11px]">กวาดล้างมอนสเตอร์และฟาร์มวัตถุดิบ</div>
+        <div class="flex justify-between items-center mt-1.5 pt-1 border-t border-slate-700/70 text-[11px]">
+          <span id="quest-progress" class="text-emerald-300 font-bold">ความคืบหน้า: 0 / 3</span>
+          <button id="btn-claim-quest" class="hidden bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-2.5 py-0.5 rounded-lg text-[10px]">รับรางวัล</button>
+        </div>
+      </div>
+
+      <!-- Roleplay Emotes Panel (เอาปุ่มวางบล็อกและเสกสภาพอากาศออกแล้ว) -->
+      <div class="glass rounded-2xl p-2.5 text-xs space-y-1.5">
+        <div class="flex justify-between items-center">
+          <span class="font-bold text-pink-300">🎭 ท่าทาง Roleplay (RP Emotes)</span>
+          <span class="text-[10px] text-slate-400">กด E เก็บแร่/สมุนไพร</span>
+        </div>
+        <div class="grid grid-cols-4 gap-1 text-[10px]">
+          <button data-emote="sit" class="rp-emote-btn bg-slate-800 hover:bg-pink-500/30 border border-slate-700 rounded py-1">🪑 นั่ง</button>
+          <button data-emote="wave" class="rp-emote-btn bg-slate-800 hover:bg-pink-500/30 border border-slate-700 rounded py-1">👋 ทัก</button>
+          <button data-emote="dance" class="rp-emote-btn bg-slate-800 hover:bg-pink-500/30 border border-slate-700 rounded py-1">💃 เต้น</button>
+          <button data-emote="kneel" class="rp-emote-btn bg-slate-800 hover:bg-pink-500/30 border border-slate-700 rounded py-1">🧎 เคารพ</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Left: Multiplayer & Roleplay Chat Box -->
+    <div class="pointer-events-auto fixed bottom-3 left-3 glass rounded-2xl p-2.5 w-80 h-44 flex flex-col">
+      <div class="flex justify-between items-center text-[11px] font-bold text-amber-300 mb-1">
+        <span>💬 แชทออนไลน์ & Roleplay (<span id="online-count">1</span> คน)</span>
+        <span class="text-[9px] text-slate-400">พิมพ์ /me แสดงบทบาท</span>
+      </div>
+      <div id="game-log" class="flex-1 overflow-y-auto custom-scroll text-[11px] space-y-1 pr-1 text-slate-200 mb-1.5"></div>
+      <form id="chat-form" class="flex gap-1">
+        <input id="chat-input" type="text" placeholder="พิมพ์พูดคุย RP (ขึ้นบอลลูนบนหัว)..." class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs outline-none focus:border-amber-400" />
+        <button type="submit" class="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3 py-1 rounded-lg text-xs">ส่ง</button>
+      </form>
+    </div>
+
+    <!-- Bottom Center: Combat, Inventory, Farming & Skill Hotbar -->
+    <div class="pointer-events-auto fixed bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5">
+      <div class="glass px-3.5 py-1 rounded-full text-[10px] text-slate-300 flex flex-wrap items-center justify-center gap-2.5">
+        <span><b class="text-amber-300">WASD</b> เดิน</span>
+        <span><b class="text-emerald-300">Shift ค้าง</b> วิ่งไว (ใช้ Stamina)</span>
+        <span><b class="text-sky-300">คลิกขวาค้าง</b> หมุนกล้อง (Roblox)</span>
+        <span><b class="text-amber-300">คลิกมอน/F</b> ต่อคอมโบ</span>
+        <span><b class="text-pink-300">คลิกแร่/E</b> ฟาร์มของ</span>
+        <span><b class="text-purple-300">I</b> กระเป๋า</span>
+        <span><b class="text-cyan-300">V</b> เปลี่ยนมุมกล้อง</span>
+      </div>
+
+      <div class="glass gold-border rounded-2xl p-2 flex items-center gap-2">
+        <button id="slot-basic" class="relative w-14 h-14 rounded-xl bg-slate-900 hover:bg-slate-800 border border-amber-500/50 flex flex-col items-center justify-center">
+          <span class="absolute top-0.5 left-1.5 text-[9px] font-bold text-amber-300">F</span>
+          <span id="combo-icon" class="text-lg">⚔️</span>
+          <span id="combo-step-label" class="text-[9px] text-amber-200 font-semibold">คอมโบ 1</span>
+        </button>
+        <button id="slot-skill1" class="relative w-14 h-14 rounded-xl bg-slate-900 hover:bg-slate-800 border border-sky-500/50 flex flex-col items-center justify-center overflow-hidden">
+          <span class="absolute top-0.5 left-1.5 text-[10px] font-bold text-sky-300">1</span>
+          <span id="skill1-icon" class="text-lg">🌀</span>
+          <span id="skill1-name" class="text-[9px] text-slate-200 truncate w-12 text-center">สกิล 1</span>
+          <div id="cd-skill1" class="hidden absolute inset-0 bg-slate-950/80 flex items-center justify-center text-xs font-bold text-amber-300"></div>
+        </button>
+        <div class="relative w-14 h-14 rounded-xl bg-slate-900/90 border border-emerald-500/50 flex flex-col items-center justify-center">
+          <span class="absolute top-0.5 left-1.5 text-[8px] font-bold text-emerald-300">PASSIVE</span>
+          <span id="passive-icon" class="text-lg">🛡️</span>
+          <span id="passive-name" class="text-[9px] text-emerald-200 truncate w-12 text-center">พาสซีพ</span>
+        </div>
+        <button id="slot-ult" class="relative w-14 h-14 rounded-xl bg-slate-900 hover:bg-slate-800 border border-amber-400 flex flex-col items-center justify-center overflow-hidden">
+          <span class="absolute top-0.5 left-1.5 text-[10px] font-bold text-amber-300">2</span>
+          <span id="ult-icon" class="text-lg">💥</span>
+          <span id="ult-name" class="text-[9px] text-amber-200 truncate w-12 text-center">อัลติเมท</span>
+          <div id="cd-ult" class="hidden absolute inset-0 bg-slate-950/80 flex items-center justify-center text-xs font-bold text-amber-300"></div>
+        </button>
+        <button id="slot-hp-pot" class="relative w-14 h-14 rounded-xl bg-slate-900 hover:bg-slate-800 border border-rose-500/40 flex flex-col items-center justify-center">
+          <span class="absolute top-0.5 left-1.5 text-[10px] font-bold text-rose-300">3</span>
+          <span class="text-lg">🧪</span>
+          <span class="text-[9px] text-rose-200">HP (<span id="count-hp-pot">5</span>)</span>
+        </button>
+        <button id="slot-mp-pot" class="relative w-14 h-14 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-500/40 flex flex-col items-center justify-center">
+          <span class="absolute top-0.5 left-1.5 text-[10px] font-bold text-cyan-300">4</span>
+          <span class="text-lg">💧</span>
+          <span class="text-[9px] text-cyan-200">MP (<span id="count-mp-pot">3</span>)</span>
+        </button>
+        <!-- ปุ่มฟาร์มทรัพยากร [E] -->
+        <button id="btn-gather-node" class="relative w-14 h-14 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/50 flex flex-col items-center justify-center">
+          <span class="absolute top-0.5 left-1.5 text-[10px] font-bold text-emerald-300">E</span>
+          <span class="text-lg">⛏️</span>
+          <span class="text-[9px] text-emerald-200 font-semibold">ฟาร์มของ</span>
+        </button>
+        <!-- ปุ่มกระเป๋า Inventory [I] -->
+        <button id="btn-open-inventory" class="relative w-14 h-14 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 flex flex-col items-center justify-center">
+          <span class="absolute top-0.5 left-1.5 text-[10px] font-bold text-amber-300">I</span>
+          <span class="text-lg">🎒</span>
+          <span class="text-[9px] text-amber-200 font-semibold">กระเป๋า</span>
+        </button>
+        <!-- ปุ่มแต่งตัวละคร -->
+        <button id="btn-open-customize" class="w-14 h-14 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-400/50 flex flex-col items-center justify-center">
+          <span class="text-lg">👗</span>
+          <span class="text-[9px] text-indigo-200 font-semibold">ดัดตัวละคร</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 4. หน้าต่างกระเป๋าไอเทมและวัตถุดิบ (INVENTORY MODAL) ================= -->
+  <div id="modal-inventory" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4">
+    <div class="glass gold-border rounded-2xl w-full max-w-3xl p-5 max-h-[85vh] flex flex-col">
+      <div class="flex justify-between items-center pb-3 border-b border-slate-700">
+        <div>
+          <h3 class="text-lg font-bold text-amber-300">🎒 กระเป๋าสัมภาระ & วัตถุดิบฟาร์ม (Inventory)</h3>
+          <p class="text-xs text-slate-300">เก็บแร่ สมุนไพร ไม้ และข้าวสาลีจากในโลกเพื่อนำไปขายรับ Gold หรือนำไปให้เชฟโรเซ่ปรุงอาหารบัพสเตตัส!</p>
+        </div>
+        <button id="btn-close-inventory" class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-xs">✕ ปิด [I]</button>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 my-4 overflow-y-auto custom-scroll pr-1">
+        <div>
+          <h4 class="text-xs font-bold text-emerald-300 mb-2">🌿 วัตถุดิบจากการฟาร์มและดรอป (Materials & Drops)</h4>
+          <div id="inv-materials-list" class="space-y-2"></div>
+        </div>
+        <div>
+          <h4 class="text-xs font-bold text-amber-300 mb-2">⚔️ อาวุธและเสบียงในครอบครอง (Equipment & Consumables)</h4>
+          <div id="inv-weapons-list" class="space-y-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 5. หน้าต่างโรงตีเหล็กและคลังอาวุธ (BLACKSMITH SHOP MODAL) ================= -->
+  <div id="modal-shop" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4">
+    <div class="glass gold-border rounded-2xl w-full max-w-2xl p-5 max-h-[85vh] flex flex-col">
+      <div class="flex justify-between items-center pb-3 border-b border-slate-700">
+        <div>
+          <h3 class="text-lg font-bold text-amber-300">⚒️ โรงตีเหล็กและคลังศาสตรา (ปรมาจารย์โบริน)</h3>
+          <p class="text-xs text-slate-300">จำหน่ายเฉพาะศาสตราวุธประจำคลาสและชุดเกราะ ("ไร้อาชีพ" สามารถสวมใส่อาวุธได้ทุกชนิด!)</p>
+        </div>
+        <button id="btn-close-shop" class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-xs">✕ ปิด</button>
+      </div>
+      <div id="shop-items-grid" class="grid grid-cols-1 md:grid-cols-2 gap-2.5 my-4 overflow-y-auto custom-scroll pr-1"></div>
+    </div>
+  </div>
+
+  <!-- ================= 6. หน้าต่างภัตตาคารและครัวเชฟโรเซ่ (CHEF RESTAURANT MODAL) ================= -->
+  <div id="modal-chef" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4">
+    <div class="glass gold-border rounded-2xl w-full max-w-2xl p-5 max-h-[85vh] flex flex-col">
+      <div class="flex justify-between items-center pb-3 border-b border-slate-700">
+        <div>
+          <h3 class="text-lg font-bold text-pink-300">🍖 ภัตตาคารและครัวปรุงอาหารบัพ (เชฟโรเซ่)</h3>
+          <p class="text-xs text-slate-300">จำหน่ายอาหารเลิศรส โพชั่นฟื้นฟู และรับปรุงอาหารจากวัตถุดิบที่คุณไปฟาร์มมาเพื่อเพิ่มสเตตัสถาวร!</p>
+        </div>
+        <button id="btn-close-chef" class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-xs">✕ ปิด</button>
+      </div>
+      <div id="chef-items-grid" class="grid grid-cols-1 md:grid-cols-2 gap-2.5 my-4 overflow-y-auto custom-scroll pr-1"></div>
+    </div>
+  </div>
+
+  <!-- ================= 7. หน้าต่างเช่าห้องพักโรงเตี๋ยม 2 ชั้น (INN MODAL) ================= -->
+  <div id="modal-inn" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4">
+    <div class="glass gold-border rounded-2xl w-full max-w-2xl p-5 max-h-[85vh] flex flex-col">
+      <div class="flex justify-between items-center pb-3 border-b border-slate-700">
+        <div>
+          <h3 class="text-lg font-bold text-amber-300">🏨 โรงเตี๋ยมนักเดินทาง 2 ชั้น (ผู้ดูแลโรงเตี๋ยม เกรย์)</h3>
+          <p class="text-xs text-slate-300">เช่าห้องพักส่วนตัวบนชั้น 2 เพื่อรับกุญแจห้อง ใช้เตียงนอนฟื้นฟูพลัง 100% และใช้ตู้เซฟเก็บของส่วนตัว</p>
+        </div>
+        <button id="btn-close-inn" class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-xs">✕ ปิด</button>
+      </div>
+      <div id="inn-rooms-grid" class="space-y-2.5 my-4 overflow-y-auto custom-scroll pr-1"></div>
+    </div>
+  </div>
+
+  <!-- ================= 8. หน้าต่างตู้เก็บของประจำห้องพัก (ROOM STORAGE MODAL) ================= -->
+  <div id="modal-storage" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4">
+    <div class="glass gold-border rounded-2xl w-full max-w-2xl p-5 max-h-[85vh] flex flex-col">
+      <div class="flex justify-between items-center pb-3 border-b border-slate-700">
+        <div>
+          <h3 id="storage-modal-title" class="text-lg font-bold text-amber-300">🗄️ ตู้เก็บของส่วนตัวประจำห้องพัก</h3>
+          <p class="text-xs text-slate-300">ฝากและถอนเหรียญทองคำ (Gold) หรือวัตถุดิบจากการฟาร์มเก็บไว้ในตู้เซฟห้องพักของคุณ</p>
+        </div>
+        <button id="btn-close-storage" class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-xs">✕ ปิด</button>
+      </div>
+      <div id="storage-items-list" class="space-y-2.5 my-4 overflow-y-auto custom-scroll pr-1"></div>
+    </div>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
