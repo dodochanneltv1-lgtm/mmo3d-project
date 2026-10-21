@@ -18,6 +18,7 @@ import {
   animatedTownCrystals,
   SeededWorldNoise,
   registerBoxCollider,
+  forEachWorldColliderInBounds,
   resolveWorldCollisions,
   createVolumetricCampfire,
   createWildlifeMesh,
@@ -38,6 +39,33 @@ import {
   updatePerformanceOptimization,
   initSettingsUI
 } from './settings.js';
+import {
+  graphicsConfig,
+  attachLightDispersion,
+  replaceTownCrystalsWithStatues,
+  repairAllCityWalls,
+  updateSprintWindFX,
+  spawnDistinctClassSkillVFX,
+  updateGraphicsSystem,
+  injectAdvancedGraphicsSettingsUI,
+  upgradeEntitiesWithOnlineAssets,
+  upgradeCharacterFashionAndEquipment,
+  injectModernUXUIPolish
+} from './graphic.js';
+import {
+  updateAllOnlineAssetAnimations,
+  applyAdvancedCharacterAndClothAnim,
+  unlockAndAnimateCityGates
+} from './anim.js';
+import {
+  FASHION_CATALOG,
+  ensureFashionState,
+  equipOwnedFashion,
+  updateFashionAuraEffects,
+  renderFashionShopUI
+} from './fashion.js';
+import { generateTerrainBlueprint } from './world-generator.js';
+
 const dynamicLightsList = [];
 
 /**
@@ -59,7 +87,7 @@ export function createDynamicLight(targetScene, type, x, y, z) {
   // 1. ตะเกียง (Lantern): แสงสีส้มอมเหลือง นุ่มนวล กระจายแสงระยะใกล้ มีการกระพริบเบาๆ
   if (type === 'lantern') {
     light = new THREE.PointLight(0xffb74d, 1.5, 12, 2.0); // (สี, ความสว่าง, ระยะกระจายแสง, อัตราการสลายตัว)
-    light.castShadow = true;
+    light.castShadow = false;
     
     // จำลองโมเดลตะเกียง
     mesh = new THREE.Mesh(
@@ -76,7 +104,7 @@ export function createDynamicLight(targetScene, type, x, y, z) {
   // 2. หลอดไฟ (Light Bulb): แสงสีขาวอมเหลือง สว่างจ้า คงที่ กระจายแสงวงกว้าง
   else if (type === 'bulb') {
     light = new THREE.PointLight(0xfffae6, 2.5, 25, 2.0);
-    light.castShadow = true;
+    light.castShadow = false;
     
     // จำลองโมเดลหลอดไฟ
     mesh = new THREE.Mesh(
@@ -92,7 +120,7 @@ export function createDynamicLight(targetScene, type, x, y, z) {
   // 3. กองไฟ (Campfire): แสงสีส้มแดง กระพริบแรงและเร็ว กระจายแสงแบบพลิ้วไหว
   else if (type === 'campfire') {
     light = new THREE.PointLight(0xf97316, 3.0, 18, 2.0);
-    light.castShadow = true;
+    light.castShadow = false;
     
     // จำลองกองไฟ (หากคุณมีโมเดลกองไฟอยู่แล้ว สามารถลบส่วนนี้ได้)
     mesh = new THREE.Mesh(
@@ -154,14 +182,22 @@ export function updateDynamicLighting(elapsedTime) {
 // ============================================================================
 const cityNightLights = [];
 const streetLampGlowDiscs = [];
+const streetLampPointLights = [];
 const buildingWindowMaterials = [];
+const activeCityNightLights = new Set();
+const activeStreetLampPointLights = new Set();
+let sceneLightRefreshTimer = 0;
+let shadowRefreshTimer = 0;
+const reservedBuildingFootprints = [];
 const animatedCarriages = [];
 const enterableBuildings = [];
 const interactiveSeats = [];
 const interactiveDoors = [];
 const interactiveBeds = [];
 const interactiveCabinets = [];
+let currentActiveInnTownId = 0;
 let ridingCarriage = null;
+let carriageBoarding = null;
 let activeSeatTarget = null;
 let activeSittingSeat = null;
 let activeBedTarget = null;
@@ -174,12 +210,12 @@ function releaseMouseForUI() {
     document.exitPointerLock?.();
   }
 }
-// ขยายขนาดเมืองหลักทั้ง 4 แห่งให้เป็นมหานครขนาดใหญ่ (Radius 92-96) และเว้นระยะห่างแต่ละเมืองไม่ให้ทับซ้อนกัน
+// ขยายทุกเมืองให้มีเขตชานเมืองและถนนวงแหวนชั้นนอกกว้างขึ้น
 TOWNS.forEach((t, idx) => {
-  if (idx === 0) { t.x = 0; t.z = 0; t.radius = 96; }
-  else if (idx === 1) { t.x = -260; t.z = -260; t.radius = 88; }
-  else if (idx === 2) { t.x = 260; t.z = -240; t.radius = 88; }
-  else if (idx === 3) { t.x = -240; t.z = 260; t.radius = 88; }
+  if (idx === 0) { t.x = 0; t.z = 0; t.radius = 124; }
+  else if (idx === 1) { t.x = -260; t.z = -260; t.radius = 124; }
+  else if (idx === 2) { t.x = 260; t.z = -240; t.radius = 124; }
+  else if (idx === 3) { t.x = -240; t.z = 260; t.radius = 124; }
 });
 function attachSoftClothSimulation(charInstance) {
   const ribbonTargets = [];
@@ -201,29 +237,63 @@ function attachSoftClothSimulation(charInstance) {
   charInstance._ribbonTargets = ribbonTargets;
 }
 function updateSoftClothSimulation(charInstance, dt, speedRatio = 0, turnDelta = 0) {
+  if (!graphicsConfig.clothPhysics) return; // รองรับปุ่ม เปิด/ปิด ฟิสิกส์เสื้อผ้าจาก graphic.js
   if (!charInstance._ribbonTargets) {
     attachSoftClothSimulation(charInstance);
   }
   const t = charInstance.animTime || 0;
-  const moveFactor = Math.min(1.5, speedRatio);
+  const moveFactor = Math.min(2.2, speedRatio);
   const ribbons = charInstance._ribbonTargets || [];
   for (let i = 0; i < ribbons.length; i++) {
     const r = ribbons[i];
     const sign = i % 2 === 0 ? -1 : 1;
-    r.mesh.rotation.z = r.baseRotZ + Math.sin(t * 5.2 + i) * (0.06 + moveFactor * 0.12) * sign;
-    r.mesh.rotation.x = r.baseRotX - 0.06 - moveFactor * 0.15 + Math.cos(t * 4.5 + i) * 0.04;
+    r.mesh.rotation.z = r.baseRotZ + Math.sin(t * 6.5 + i) * (0.08 + moveFactor * 0.18) * sign;
+    r.mesh.rotation.x = r.baseRotX - 0.08 - moveFactor * 0.22 + Math.cos(t * 5.5 + i) * 0.06;
+  }
+  // ผ้าคลุมและกระโปรงพลิ้วแรงขึ้นตามความเร็ววิ่ง
+  if (charInstance.joints?.cape) {
+    charInstance.joints.cape.rotation.x = 0.12 + moveFactor * 0.28 + Math.sin(t * 8.0) * (0.05 + moveFactor * 0.08);
   }
 }
+
 const _origBuildModel = ArticulatedCharacter3D.prototype.buildModel;
 ArticulatedCharacter3D.prototype.buildModel = function (...args) {
   const res = _origBuildModel.apply(this, args);
   attachSoftClothSimulation(this);
+  upgradeCharacterFashionAndEquipment(this);
   return res;
 };
+
 const _origUpdateAnimation = ArticulatedCharacter3D.prototype.updateAnimation;
 ArticulatedCharacter3D.prototype.updateAnimation = function (dt, speedRatio = 0, isJumping = false, verticalVelocity = 0, turnDelta = 0, isInWater = false) {
   _origUpdateAnimation.call(this, dt, speedRatio, isJumping, verticalVelocity, turnDelta, isInWater);
   updateSoftClothSimulation(this, dt, speedRatio, turnDelta);
+
+  // ปรับอนิเมชั่นตอนวิ่งไว (Sprint): โน้มตัวไปข้างหน้ามากขึ้น แกว่งแขนมากขึ้น และก้าวขายาวขึ้น
+  if (speedRatio > 1.15 && !isJumping && !isInWater && this.attackTimer <= 0) {
+    const sprintIntensity = Math.min(1.0, (speedRatio - 1.0) / 1.5);
+    const runCycle = this.animTime * 13.5;
+
+    // 1) โน้มลำตัวไปข้างหน้า
+    if (this.joints?.torso) {
+      this.joints.torso.rotation.x = THREE.MathUtils.lerp(this.joints.torso.rotation.x, 0.34 * sprintIntensity, 0.65);
+    }
+    if (this.joints?.head) {
+      this.joints.head.rotation.x = -0.18 * sprintIntensity; // เงยหน้ามองทางขณะโน้มตัววิ่ง
+    }
+    // 2) แกว่งแขนกว้างและแรงขึ้น
+    if (this.joints?.shoulderL && this.joints?.shoulderR) {
+      this.joints.shoulderL.rotation.x = Math.sin(runCycle) * (1.25 * sprintIntensity);
+      this.joints.shoulderR.rotation.x = -Math.sin(runCycle) * (1.25 * sprintIntensity);
+      if (this.joints.elbowL) this.joints.elbowL.rotation.x = -0.65 * sprintIntensity;
+      if (this.joints.elbowR) this.joints.elbowR.rotation.x = -0.65 * sprintIntensity;
+    }
+    // 3) ก้าวขายาวและกว้างขึ้น
+    if (this.joints?.hipL && this.joints?.hipR) {
+      this.joints.hipL.rotation.x = -Math.sin(runCycle) * (1.18 * sprintIntensity);
+      this.joints.hipR.rotation.x = Math.sin(runCycle) * (1.18 * sprintIntensity);
+    }
+  }
 };
 // ============================================================================
 // 1. FIREBASE REALTIME DATABASE & DUAL-CHANNEL MULTIPLAYER INITIALIZATION
@@ -287,6 +357,45 @@ let myClientId = "hero_" + SESSION_SUFFIX;
 // 2. SOUND ENGINE & SCENE / NATURAL SHADING & RESHADE POST-PROCESSING SETUP
 // ============================================================================
 const sound = new SoundEngine();
+// ยกระดับเสียงฝีเท้ากระทบพื้น (Footstep Ground Impact Sound) แยกจังหวะเดินและวิ่ง
+sound.sfxStep = function (isSprinting = false) {
+  if (!this.enabled) return;
+  try {
+    this._init();
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    // 1. เสียงส้นเท้ากระแทกพื้นดิน (Low Thump Impact)
+    const osc = ctx.createOscillator();
+    const thumpGain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(isSprinting ? 135 : 95, now);
+    osc.frequency.exponentialRampToValueAtTime(28, now + 0.065);
+    thumpGain.gain.setValueAtTime(isSprinting ? 0.28 : 0.16, now);
+    thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+    osc.connect(thumpGain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.075);
+
+    // 2. เสียงเสียดสีพื้นหญ้า/กรวดหิน (Crisp Ground Crunch Noise)
+    const bufSize = Math.floor(ctx.sampleRate * 0.055);
+    const noiseBuf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+    const data = noiseBuf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufSize * 0.35));
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = noiseBuf;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = isSprinting ? 1150 : 850;
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(isSprinting ? 0.22 : 0.12, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.055);
+    noise.connect(filter).connect(noiseGain).connect(ctx.destination);
+    noise.start(now);
+  } catch (_) {}
+};
 document.getElementById('btn-audio-toggle').onclick = () => {
   sound.enabled = !sound.enabled;
   document.getElementById('audio-icon').textContent = sound.enabled ? '🔊' : '🔇';
@@ -305,9 +414,11 @@ scene.fog = new THREE.FogExp2(0x7dd3fc, 0.0028);
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.08, 560);
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
+const isCompactDevice = window.matchMedia('(pointer: coarse), (max-width: 900px)').matches;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, gameSettings.pixelRatio || 1, isCompactDevice ? 1 : 1.5));
+renderer.shadowMap.enabled = !!gameSettings.shadows;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.autoUpdate = false;
 container.appendChild(renderer.domElement);
 // ติดตั้ง Post-Processing Reshade ที่ลดความฟุ้งแสบตา เน้นเงาลึก เฉดสีคมชัด และมิติ 3D
 const postProc = setupReshadePostProcessing(renderer, scene, camera);
@@ -321,8 +432,10 @@ const hemiLight = new THREE.HemisphereLight(0xfff3e0, 0x1e293b, 0.52);
 scene.add(hemiLight);
 const dirLight = new THREE.DirectionalLight(0xfff7ed, 1.12);
 dirLight.position.set(36, 62, 34);
-dirLight.castShadow = true;
-dirLight.shadow.mapSize.set(2048, 2048);
+dirLight.castShadow = !!gameSettings.shadows;
+dirLight.shadow.autoUpdate = false;
+const initialShadowMapSize = gameSettings.shadowMapSize || 1024;
+dirLight.shadow.mapSize.set(initialShadowMapSize, initialShadowMapSize);
 dirLight.shadow.camera.near = 1;
 dirLight.shadow.camera.far = 220;
 dirLight.shadow.bias = -0.0004;
@@ -407,6 +520,9 @@ function applyNaturalWeather(type) {
   }
 }
 const REAL_SECONDS_PER_INGAME_DAY = 25 * 60;
+function getCurrentGameDay() {
+  return Math.floor(Date.now() / 1000 / REAL_SECONDS_PER_INGAME_DAY);
+}
 const streetLampMaterials = [];
 const SOLAR_PALETTES = {
   night:   { sun: new THREE.Color(0x64748b), skyHemi: new THREE.Color(0x1e293b), groundHemi: new THREE.Color(0x090d16), fog: new THREE.Color(0x0b1329) },
@@ -420,6 +536,7 @@ const _curSunCol = new THREE.Color();
 const _curSkyHemiCol = new THREE.Color();
 const _curGndHemiCol = new THREE.Color();
 const _curFogCol = new THREE.Color();
+const _streetLampWorldPosition = new THREE.Vector3();
 
 function sampleSolarKeyframes(gameHours) {
   const keyframes = [
@@ -524,27 +641,58 @@ function updateDayNightAndNaturalWeather(elapsedTime, dt, playerPos) {
     hemiLight.intensity = isPlayerIndoors ? 1.15 : THREE.MathUtils.lerp(0.48, 0.70, dayFactor);
   }
 
-  const lampGlow = THREE.MathUtils.lerp(0.18, 3.2, nightBlend);
-  streetLampMaterials.forEach(mat => { mat.emissiveIntensity = lampGlow; });
-  buildingWindowMaterials.forEach(mat => { mat.emissiveIntensity = THREE.MathUtils.lerp(0.12, 2.6, nightBlend); });
-  streetLampGlowDiscs.forEach(disc => {
-    disc.visible = nightBlend > 0.08;
-    if (disc.visible && disc.material) {
-      disc.material.opacity = nightBlend * (0.30 + Math.sin(elapsedTime * 3.5) * 0.04);
-    }
-  });
+  sceneLightRefreshTimer -= dt;
+  if (sceneLightRefreshTimer <= 0) {
+    sceneLightRefreshTimer = 0.25;
+    const lampGlow = THREE.MathUtils.lerp(0.18, 3.2, nightBlend);
+    streetLampMaterials.forEach(mat => { mat.emissiveIntensity = lampGlow; });
+    buildingWindowMaterials.forEach(mat => {
+      mat.emissiveIntensity = THREE.MathUtils.lerp(0.12, 2.6, nightBlend);
+    });
+    streetLampGlowDiscs.forEach(disc => {
+      disc.visible = nightBlend > 0.08;
+      if (disc.visible && disc.material) {
+        disc.material.opacity = nightBlend * (0.30 + Math.sin(elapsedTime * 3.5) * 0.04);
+      }
+    });
 
-  cityNightLights.forEach(item => {
-    const dist = Math.hypot(playerPos.x - item.wx, playerPos.z - item.wz);
-    if (dist < 110) {
+    for (const light of activeStreetLampPointLights) light.visible = false;
+    activeStreetLampPointLights.clear();
+    const nearbyStreetLights = [];
+    for (const light of streetLampPointLights) {
+      light.getWorldPosition(_streetLampWorldPosition);
+      const dx = playerPos.x - _streetLampWorldPosition.x;
+      const dz = playerPos.z - _streetLampWorldPosition.z;
+      const distanceSq = dx * dx + dz * dz;
+      if (distanceSq < 45 * 45) nearbyStreetLights.push({ light, distanceSq });
+    }
+    nearbyStreetLights.sort((a, b) => a.distanceSq - b.distanceSq);
+    for (let i = 0; i < Math.min(4, nearbyStreetLights.length); i++) {
+      const light = nearbyStreetLights[i].light;
+      light.visible = true;
+      light.intensity = THREE.MathUtils.lerp(light.userData.baseIntensity * 0.12, light.userData.baseIntensity, nightBlend);
+      activeStreetLampPointLights.add(light);
+    }
+
+    for (const item of activeCityNightLights) item.light.visible = false;
+    activeCityNightLights.clear();
+    const nearbyCityLights = [];
+    for (const item of cityNightLights) {
+      const dx = playerPos.x - item.wx;
+      const dz = playerPos.z - item.wz;
+      const distanceSq = dx * dx + dz * dz;
+      if (distanceSq < 60 * 60) nearbyCityLights.push({ item, distanceSq });
+    }
+    nearbyCityLights.sort((a, b) => a.distanceSq - b.distanceSq);
+    for (let i = 0; i < Math.min(8, nearbyCityLights.length); i++) {
+      const item = nearbyCityLights[i].item;
       item.light.visible = true;
       item.light.intensity = item.isIndoorLight
         ? item.maxIntensity
         : THREE.MathUtils.lerp(item.maxIntensity * 0.12, item.maxIntensity, nightBlend);
-    } else {
-      item.light.visible = false;
+      activeCityNightLights.add(item);
     }
-  });
+  }
 
   naturalWeatherTimer -= dt;
   if (naturalWeatherTimer <= 0) {
@@ -576,6 +724,7 @@ const farmingNodes = []; // เก็บจุดฟาร์มแร่ สม
 const npcs = [];         // NPC ประจำร้าน/กิลด์
 const wanderingNPCs = []; // NPC ชาวเมือง ทหารยาม และชาวบ้านในหมู่บ้านชนบทที่เดินไปมา
 const floatingLabels = [];
+let floatingLabelsUpdateTimer = 0;
 function registerFloatingLabel(targetObj3D, htmlContent, yOffset = 2.4) {
   const el = document.createElement('div');
   el.className = 'world-nametag';
@@ -589,13 +738,21 @@ function createTerrainDetailTexture() {
   const c = document.createElement('canvas');
   c.width = 256; c.height = 256;
   const ctx = c.getContext('2d');
-  ctx.fillStyle = '#e2e8f0';
+  ctx.fillStyle = '#c8c4ad';
   ctx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 4200; i++) {
-    const shade = 195 + Math.floor(Math.random() * 50);
-    ctx.fillStyle = `rgb(${shade},${shade},${shade})`;
-    ctx.fillRect(Math.random() * 256, Math.random() * 256, 2, 3);
+  let seed = 0x5f3759df;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const fleckColors = ['#bbb79e', '#d2ccb0', '#aaa991', '#d8d1b7', '#a8a68e'];
+  for (let i = 0; i < 3600; i++) {
+    const size = 1 + Math.floor(random() * 3);
+    ctx.fillStyle = fleckColors[Math.floor(random() * fleckColors.length)];
+    ctx.globalAlpha = 0.2 + random() * 0.32;
+    ctx.fillRect(random() * 256, random() * 256, size, size + 1);
   }
+  ctx.globalAlpha = 1;
   const tex = new THREE.CanvasTexture(c);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
@@ -662,35 +819,95 @@ function spawnWildlifeAt(wx, wz, forcedType = null) {
     angle: startAngle
   });
 }
-function spawnMonsterAt(wx, wz, lvOverride = null) {
-  const wy = worldNoise.getHeight(wx, wz);
-  if (wy < WATER_LEVEL + 0.25) return;
-  const distFromCenter = Math.hypot(wx, wz);
-  const lv = lvOverride || Math.max(1, Math.min(30, Math.floor(distFromCenter / 28) + 1));
-  let spec;
-  if (wx < -55 && wz < -55) {
-    spec = { name: 'หมาป่าเขี้ยวทมิฬ', type: 'wolf', hp: 125 + lv * 36, atk: 16 + lv * 4, exp: 50 + lv * 18, gold: 40 + lv * 12 };
-  } else if (wx > 55 && wz < -45) {
-    spec = { name: 'โกเลมเพลิงอัคนี', type: 'golem', hp: 190 + lv * 52, atk: 22 + lv * 6, exp: 85 + lv * 25, gold: 70 + lv * 18 };
-  } else if (wx < -45 && wz > 55) {
-    spec = { name: 'โกเลมน้ำแข็งเหมันต์', type: 'golem', hp: 175 + lv * 46, atk: 19 + lv * 5, exp: 78 + lv * 22, gold: 62 + lv * 16 };
-  } else {
-    const roll = Math.floor(Math.abs(wx + wz)) % 3;
-    if (roll === 0) {
-      spec = { name: 'สไลม์วารีคริสตัล', type: 'slime', hp: 90 + lv * 26, atk: 11 + lv * 3, exp: 38 + lv * 14, gold: 30 + lv * 10 };
-    } else if (roll === 1) {
-      spec = { name: 'ก็อบลินลาดตระเวน', type: 'goblin', hp: 130 + lv * 32, atk: 15 + lv * 4, exp: 52 + lv * 16, gold: 42 + lv * 12 };
-    } else {
-      spec = { name: 'หมาป่าทุ่งหญ้า', type: 'wolf', hp: 115 + lv * 30, atk: 14 + lv * 4, exp: 48 + lv * 15, gold: 36 + lv * 11 };
+const BOSS_SPAWNS = [
+  { id: 'boss_treant', name: 'ราชันย์พฤกษาโบราณ', type: 'boss_treant', x: -700, z: -700, lv: 36, hp: 26000, atk: 155, exp: 3200, gold: 1800, tier: 'danger', isBoss: true },
+  { id: 'boss_wyrm', name: 'มังกรเพลิงหายนะ', type: 'boss_wyrm', x: 700, z: -700, lv: 40, hp: 32000, atk: 185, exp: 4000, gold: 2400, tier: 'danger', isBoss: true },
+  { id: 'boss_voidknight', name: 'อัศวินสุญญะทมิฬ', type: 'boss_voidknight', x: -700, z: 700, lv: 44, hp: 39000, atk: 210, exp: 5000, gold: 3000, tier: 'danger', isBoss: true }
+];
+
+function spawnMonsterAt(wx, wz, lvOverride = null, forcedSpec = null) {
+  let wy = worldNoise.getHeight(wx, wz);
+  if (wy < WATER_LEVEL + 0.25 && forcedSpec?.isBoss) {
+    let landFound = false;
+    for (let ring = 4; ring <= 24 && !landFound; ring += 4) {
+      for (let direction = 0; direction < 8; direction++) {
+        const angle = direction * Math.PI / 4;
+        const candidateX = forcedSpec.x + Math.cos(angle) * ring;
+        const candidateZ = forcedSpec.z + Math.sin(angle) * ring;
+        const candidateY = worldNoise.getHeight(candidateX, candidateZ);
+        if (candidateY >= WATER_LEVEL + 0.25) {
+          wx = candidateX;
+          wz = candidateZ;
+          wy = candidateY;
+          landFound = true;
+          break;
+        }
+      }
     }
+  }
+  if (wy < WATER_LEVEL + 0.25) return;
+  const nearestTownDistance = TOWNS.reduce((nearest, town) =>
+    Math.min(nearest, Math.hypot(wx - town.x, wz - town.z)), Infinity);
+  const tier = nearestTownDistance < 165 ? 'easy'
+    : nearestTownDistance < 330 ? 'intermediate'
+      : nearestTownDistance < 560 ? 'high' : 'danger';
+  const tierScale = { easy: 1, intermediate: 1.18, high: 1.38, danger: 1.62 }[tier];
+  const lv = lvOverride || forcedSpec?.lv || Math.max(1, Math.min(45, Math.floor(nearestTownDistance / 28) + 1));
+  let spec = forcedSpec;
+  if (!spec && tier === 'easy' && wx < -55 && wz < -55) {
+    spec = { name: 'หมาป่าเขี้ยวทมิฬ', type: 'wolf', hp: 125 + lv * 36, atk: 16 + lv * 4, exp: 50 + lv * 18, gold: 40 + lv * 12 };
+  } else if (!spec && tier === 'easy' && wx > 55 && wz < -45) {
+    spec = { name: 'โกเลมเพลิงอัคนี', type: 'golem', hp: 190 + lv * 52, atk: 22 + lv * 6, exp: 85 + lv * 25, gold: 70 + lv * 18 };
+  } else if (!spec && tier === 'easy' && wx < -45 && wz > 55) {
+    spec = { name: 'โกเลมน้ำแข็งเหมันต์', type: 'golem', hp: 175 + lv * 46, atk: 19 + lv * 5, exp: 78 + lv * 22, gold: 62 + lv * 16 };
+  } else if (!spec) {
+    const roll = Math.floor(Math.abs(wx * 13 + wz * 7)) % 3;
+    let candidates;
+    if (tier === 'easy') {
+      candidates = [
+        { name: 'สไลม์วารีคริสตัล', type: 'slime', hp: 90, atk: 11, exp: 38, gold: 30 },
+        { name: 'ก็อบลินลาดตระเวน', type: 'goblin', hp: 130, atk: 15, exp: 52, gold: 42 },
+        { name: 'หมาป่าทุ่งหญ้า', type: 'wolf', hp: 115, atk: 14, exp: 48, gold: 36 }
+      ];
+    } else if (tier === 'intermediate') {
+      candidates = [
+        { name: 'โจรทางหลวง', type: 'bandit', hp: 165, atk: 24, exp: 110, gold: 92 },
+        { name: 'หมาป่าเขี้ยวเหล็ก', type: 'direwolf', hp: 205, atk: 30, exp: 135, gold: 105 },
+        { name: 'ก็อบลินผู้พิทักษ์', type: 'goblin', hp: 185, atk: 26, exp: 120, gold: 98 }
+      ];
+    } else if (tier === 'high') {
+      candidates = [
+        { name: 'อสูรพฤกษาหนาม', type: 'thornbeast', hp: 330, atk: 48, exp: 250, gold: 185 },
+        { name: 'ภูตน้ำแข็งเร้นเงา', type: 'frost_wraith', hp: 290, atk: 55, exp: 280, gold: 210 },
+        { name: 'มังกรเพลิงวัยเยาว์', type: 'infernal_drake', hp: 410, atk: 62, exp: 320, gold: 240 }
+      ];
+    } else {
+      candidates = [
+        { name: 'อัศวินสุญญะพเนจร', type: 'void_knight', hp: 620, atk: 82, exp: 520, gold: 360 },
+        { name: 'มังกรเพลิงคลั่ง', type: 'infernal_drake', hp: 720, atk: 90, exp: 600, gold: 420 },
+        { name: 'ภูตน้ำแข็งอาฆาต', type: 'frost_wraith', hp: 560, atk: 94, exp: 610, gold: 430 }
+      ];
+    }
+    const chosen = candidates[roll];
+    spec = {
+      ...chosen,
+      hp: Math.round((chosen.hp + lv * 24) * tierScale),
+      atk: Math.round((chosen.atk + lv * 2) * tierScale),
+      exp: Math.round((chosen.exp + lv * 14) * tierScale),
+      gold: Math.round((chosen.gold + lv * 10) * tierScale)
+    };
   }
   const mesh = createMonsterMesh(spec.type);
   mesh.position.set(wx, wy, wz);
-  const monId = `mon_${Math.round(wx)}_${Math.round(wz)}`;
+  const monId = spec.isBoss
+    ? spec.id
+    : `mon_${Math.round(wx)}_${Math.round(wz)}`;
   const monObj = {
     id: monId,
     name: spec.name,
     type: spec.type,
+    tier: spec.tier || tier,
+    isBoss: !!spec.isBoss,
     lv,
     maxHp: spec.hp,
     hp: spec.hp,
@@ -704,7 +921,8 @@ function spawnMonsterAt(wx, wz, lvOverride = null) {
     patrolPause: 0,
     mesh,
     vx: 0, vy: 0, vz: 0,
-    atkCooldown: 0,
+    atkCooldown: spec.isBoss ? 1.2 : 0,
+    attackRange: spec.isBoss ? 6.2 : 2.1,
     animOffset: Math.random() * 10
   };
   // สำคัญมาก: ห้ามเขียนทับ mesh.userData เพราะต้องรักษา mesh.userData.animParts ไว้สำหรับอนิเมชั่นมอนสเตอร์!
@@ -762,6 +980,10 @@ function spawnFarmingNodeAt(wx, wz, forcedType = null) {
       nodeObj.active = true;
       mesh.visible = true;
     }, nodeReadyAt - Date.now());
+  }
+  // ทำให้แร่มิธริลและสมุนไพรแสงจันทร์เรืองแสงสว่างกระจายรอบข้างจริง
+  if (matId === 'mithril_ore' || matId === 'moon_herb') {
+    attachLightDispersion(mesh, matId === 'mithril_ore' ? 0x38bdf8 : 0x34d399, 5.5, 32);
   }
 
   worldGroup.add(mesh);
@@ -938,63 +1160,41 @@ function buildProceduralOutpostVillage(cx, cz, chunkGroup) {
   );
   chunkGroup.add(vGroup);
 }
-function generateChunk(cx, cz) {
+async function generateChunk(cx, cz) {
   const key = `${cx},${cz}`;
   if (chunkMap.has(key)) return;
   const chunkGroup = new THREE.Group();
   chunkGroup.position.set(cx * CHUNK_SIZE, 0, cz * CHUNK_SIZE);
-  const segs = 22;
+  const segs = gameSettings.preset === 'potato' ? 12 : gameSettings.preset === 'low' ? 14 : 18;
   const geo = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, segs, segs);
   geo.rotateX(-Math.PI / 2);
   const pos = geo.attributes.position;
 
-  // ตรวจสอบว่า Chunk นี้เคยถูกสร้างและบันทึกไว้ในแคชหรือยัง
   const cachedBlueprint = worldCache.getChunkBlueprint(cx, cz);
-  if (cachedBlueprint && cachedBlueprint.heights && cachedBlueprint.colors) {
-    for (let i = 0; i < pos.count; i++) {
-      pos.setY(i, cachedBlueprint.heights[i]);
-    }
-    geo.setAttribute('color', new THREE.Float32BufferAttribute(cachedBlueprint.colors, 3));
+  let heights;
+  let colors;
+  if (cachedBlueprint &&
+      cachedBlueprint.heights?.length === pos.count &&
+      cachedBlueprint.colors?.length === pos.count * 3) {
+    heights = cachedBlueprint.heights;
+    colors = cachedBlueprint.colors;
   } else {
-    const heights = new Float32Array(pos.count);
-    const colors = new Float32Array(pos.count * 3);
-    const cObj = new THREE.Color();
+    const localCoordinates = new Float32Array(pos.count * 2);
     for (let i = 0; i < pos.count; i++) {
-      const lx = pos.getX(i);
-      const lz = pos.getZ(i);
-      const wx = lx + cx * CHUNK_SIZE;
-      const wz = lz + cz * CHUNK_SIZE;
-      const h = worldNoise.getHeight(wx, wz);
-      pos.setY(i, h);
-      heights[i] = h;
-
-      let inTown = null;
-      for (const t of TOWNS) {
-        if (Math.hypot(wx - t.x, wz - t.z) < t.radius) { inTown = t; break; }
-      }
-      if (inTown) {
-        cObj.setHex(inTown.groundColor);
-      } else if (h < WATER_LEVEL + 0.45) {
-        cObj.setHex(0xeab308);
-      } else if (wx < -55 && wz < -55) {
-        cObj.setHex(0x15803d);
-      } else if (wx > 55 && wz < -45) {
-        cObj.setHex(0xc2410c);
-      } else if (wx < -45 && wz > 55) {
-        cObj.setHex(0xcbd5e1);
-      } else {
-        cObj.setHex(h > 3.8 ? 0x64748b : 0x22c55e);
-      }
-      const shadeFactor = THREE.MathUtils.clamp(0.76 + (h + 2.0) * 0.032, 0.62, 1.06);
-      cObj.multiplyScalar(shadeFactor);
-      colors[i * 3] = cObj.r;
-      colors[i * 3 + 1] = cObj.g;
-      colors[i * 3 + 2] = cObj.b;
+      localCoordinates[i * 2] = pos.getX(i);
+      localCoordinates[i * 2 + 1] = pos.getZ(i);
     }
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    // บันทึกโครงสร้าง Chunk ลงฐานข้อมูลแคชถาวรทันที
+    ({ heights, colors } = await generateTerrainBlueprint({
+      cx,
+      cz,
+      chunkSize: CHUNK_SIZE,
+      localCoordinates,
+      seedStr: worldNoise.seedStr
+    }));
     worldCache.saveChunkBlueprint(cx, cz, { heights, colors });
   }
+  for (let i = 0; i < pos.count; i++) pos.setY(i, heights[i]);
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   geo.computeVertexNormals();
   const terrainMesh = new THREE.Mesh(
     geo,
@@ -1003,6 +1203,10 @@ function generateChunk(cx, cz) {
   terrainMesh.receiveShadow = true;
   chunkGroup.add(terrainMesh);
   terrainMeshes.push(terrainMesh);
+  worldGroup.add(chunkGroup);
+  chunkMap.set(key, chunkGroup);
+  await waitForRenderFrame();
+
   const centerWx = cx * CHUNK_SIZE;
   const centerWz = cz * CHUNK_SIZE;
   let nearMajorTown = false;
@@ -1017,6 +1221,7 @@ function generateChunk(cx, cz) {
     const villageRoll = worldNoise.hash2D(cx * 73, cz * 97);
     if (villageRoll > 0.72 || (Math.abs(cx) === 2 && cz === 0)) {
       buildProceduralOutpostVillage(cx, cz, chunkGroup);
+      await waitForRenderFrame();
     }
     for (let idx = 0; idx < 4; idx++) {
       const rx = worldNoise.hash2D(cx * 31 + idx, cz * 17 + idx);
@@ -1051,15 +1256,7 @@ function generateChunk(cx, cz) {
         tree.position.set(lx, wy, lz);
         chunkGroup.add(tree);
         worldColliders.push({ x: wx, z: wz, radius: 0.65, topY: wy + 3.9 });
-      } else {
-        const rock = new THREE.Mesh(
-          new THREE.DodecahedronGeometry(1.05, 0),
-          createAnimeMaterial({ color: 0x64748b, roughness: 0.72 })
-        );
-        rock.position.set(lx, wy + 0.55, lz);
-        rock.castShadow = true; rock.receiveShadow = true;
-        chunkGroup.add(rock);
-        worldColliders.push({ x: wx, z: wz, radius: 1.05, topY: wy + 1.45, stepable: true });
+        await waitForRenderFrame();
       }
     }
     // สุ่มเกิดจุดฟาร์มแร่/สมุนไพร/ไม้โบราณในแต่ละ Chunk
@@ -1073,6 +1270,7 @@ function generateChunk(cx, cz) {
     const wHash = worldNoise.hash2D(cx * 47, cz * 59);
     if (wHash > 0.32) {
       spawnWildlifeAt(centerWx + (wHash - 0.5) * 18, centerWz - (wHash - 0.5) * 18);
+      await waitForRenderFrame();
     }
     // สุ่มเกิดมอนสเตอร์ 2 ตัวต่อ Chunk
     for (let mIdx = 0; mIdx < 2; mIdx++) {
@@ -1081,19 +1279,27 @@ function generateChunk(cx, cz) {
       const mwx = centerWx + (mHashX - 0.5) * (CHUNK_SIZE - 8);
       const mwz = centerWz + (mHashZ - 0.5) * (CHUNK_SIZE - 8);
       spawnMonsterAt(mwx, mwz);
+      await waitForRenderFrame();
+    }
+    const bossSpawn = BOSS_SPAWNS.find(boss =>
+      Math.floor(boss.x / CHUNK_SIZE) === cx && Math.floor(boss.z / CHUNK_SIZE) === cz
+    );
+    if (bossSpawn && !monsters.some(mon => mon.id === bossSpawn.id)) {
+      spawnMonsterAt(bossSpawn.x, bossSpawn.z, bossSpawn.lv, bossSpawn);
+      await waitForRenderFrame();
     }
   }
-  worldGroup.add(chunkGroup);
-  chunkMap.set(key, chunkGroup);
 }
 // สร้างโคมไฟถนนเรืองแสงพร้อมวงแสงตกกระทบพื้นและ PointLight ส่องสว่างจริงตอนกลางคืน
 function createGlowingStreetLamp(wx, wy, wz, withPointLight = false, rotY = 0) {
-  const lampGroup = createOrnateStreetLamp(wx, wy, wz, rotY, streetLampMaterials, streetLampGlowDiscs);
+  const lampGroup = createOrnateStreetLamp(wx, wy, wz, rotY, streetLampMaterials, streetLampGlowDiscs, streetLampPointLights);
   if (withPointLight) {
-    const pt = new THREE.PointLight(0xffedd5, 2.2, 26, 1.4);
+    const pt = new THREE.PointLight(0xffedd5, 48, 34, 1.4);
     pt.position.set(0.74, 3.6, 0);
+    pt.castShadow = false;
+    pt.visible = false;
     lampGroup.add(pt);
-    cityNightLights.push({ light: pt, wx, wz, maxIntensity: 2.4 });
+    cityNightLights.push({ light: pt, wx, wz, maxIntensity: 48 });
   }
   worldGroup.add(lampGroup);
   worldColliders.push({ x: wx, z: wz, radius: 0.35, topY: wy + 4.5, stepable: false });
@@ -1139,9 +1345,96 @@ function buildGrandCityGate(town, gateDir, gateDist) {
     0
   );
 }
+function resolveBuildingPlacement(spec) {
+  const { width, depth, rotY = 0 } = spec;
+  const nearestTown = TOWNS.reduce((nearest, town) => {
+    const distance = Math.hypot(spec.wx - town.x, spec.wz - town.z);
+    return !nearest || distance < nearest.distance ? { town, distance } : nearest;
+  }, null);
+  const halfX = (width * Math.abs(Math.cos(rotY)) + depth * Math.abs(Math.sin(rotY))) / 2;
+  const halfZ = (width * Math.abs(Math.sin(rotY)) + depth * Math.abs(Math.cos(rotY))) / 2;
+  const clearance = 1.5;
+
+  const isClear = (wx, wz) => {
+    if (nearestTown && nearestTown.distance <= nearestTown.town.radius + 12) {
+      const townDx = wx - nearestTown.town.x;
+      const townDz = wz - nearestTown.town.z;
+      if (Math.hypot(townDx, townDz) + Math.hypot(halfX, halfZ) > nearestTown.town.radius - 3) return false;
+
+      const roadHalfWidth = 5.2;
+      const roadReach = nearestTown.town.radius * 0.98;
+      const overlapsMainRoad =
+        (Math.abs(townDx) < halfX + roadHalfWidth && Math.abs(townDz) < roadReach + halfZ) ||
+        (Math.abs(townDz) < halfZ + roadHalfWidth && Math.abs(townDx) < roadReach + halfX);
+      if (overlapsMainRoad) return false;
+
+      const nearestX = Math.max(Math.abs(townDx) - halfX, 0);
+      const nearestZ = Math.max(Math.abs(townDz) - halfZ, 0);
+      const farthestCorner = Math.hypot(Math.abs(townDx) + halfX, Math.abs(townDz) + halfZ);
+      const nearestCorner = Math.hypot(nearestX, nearestZ);
+      const ringRoadBands = [[24.5, 31.5], [68, 75]];
+      if (ringRoadBands.some(([inner, outer]) =>
+        farthestCorner >= inner - roadHalfWidth && nearestCorner <= outer + roadHalfWidth
+      )) return false;
+    }
+    for (const footprint of reservedBuildingFootprints) {
+      if (Math.abs(wx - footprint.x) < halfX + footprint.halfX + clearance &&
+          Math.abs(wz - footprint.z) < halfZ + footprint.halfZ + clearance) {
+        return false;
+      }
+    }
+    for (const collider of worldColliders) {
+      if (collider.disabled) continue;
+      let otherHalfX;
+      let otherHalfZ;
+      if (collider.type === 'box' && Number.isFinite(collider.minX) && Number.isFinite(collider.maxX)) {
+        otherHalfX = (collider.maxX - collider.minX) / 2;
+        otherHalfZ = (collider.maxZ - collider.minZ) / 2;
+        if (otherHalfX < 2.25 || otherHalfZ < 2.25) continue;
+      } else if (Number.isFinite(collider.radius) && collider.radius >= 3.2) {
+        otherHalfX = collider.radius;
+        otherHalfZ = collider.radius;
+      } else {
+        continue;
+      }
+      const otherX = collider.type === 'box' ? (collider.minX + collider.maxX) / 2 : collider.x;
+      const otherZ = collider.type === 'box' ? (collider.minZ + collider.maxZ) / 2 : collider.z;
+      if (Math.abs(wx - otherX) < halfX + otherHalfX + clearance &&
+          Math.abs(wz - otherZ) < halfZ + otherHalfZ + clearance) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  if (isClear(spec.wx, spec.wz)) {
+    reservedBuildingFootprints.push({ x: spec.wx, z: spec.wz, halfX, halfZ });
+    return { wx: spec.wx, wz: spec.wz };
+  }
+
+  for (let radius = 10; radius <= 60; radius += 10) {
+    for (let x = -radius; x <= radius; x += 10) {
+      for (let z = -radius; z <= radius; z += 10) {
+        if (Math.max(Math.abs(x), Math.abs(z)) !== radius) continue;
+        const wx = spec.wx + x;
+        const wz = spec.wz + z;
+        if (!isClear(wx, wz)) continue;
+        reservedBuildingFootprints.push({ x: wx, z: wz, halfX, halfZ });
+        return { wx, wz };
+      }
+    }
+  }
+
+  console.warn(`Unable to place building without overlap: ${spec.title}`);
+  return null;
+}
+
 // สร้างอาคารมีประตูบานพับเปิด-ปิดได้ โต๊ะเก้าอี้ 3D คลิกนั่งได้ และหน้าต่างมีกรอบสวยงาม
 function buildEnterableBuilding(spec) {
-  const { wx, wz, width, depth, height, wallColor, roofColor, title, subTitle, role, npcSpec, rotY = 0 } = spec;
+  const placement = resolveBuildingPlacement(spec);
+  if (!placement) return;
+  const { wx, wz } = placement;
+  const { width, depth, height, wallColor, roofColor, title, subTitle, role, npcSpec, rotY = 0 } = spec;
   const wy = worldNoise.getHeight(wx, wz);
   const bGroup = new THREE.Group();
   bGroup.position.set(wx, wy, wz);
@@ -1235,6 +1528,7 @@ function buildEnterableBuilding(spec) {
   });
   const interiorLight = new THREE.PointLight(0xfff4e6, 3.8, width * 2.2, 0.85);
   interiorLight.position.set(0, height * 0.78, 0);
+  interiorLight.visible = false;
   bGroup.add(interiorLight);
   cityNightLights.push({ light: interiorLight, wx, wz, maxIntensity: 3.8, isIndoorLight: true });
   const roofGroup = new THREE.Group();
@@ -1314,15 +1608,21 @@ function buildEnterableBuilding(spec) {
     0
   );
   worldGroup.add(bGroup);
+  const town = TOWNS.reduce((closest, current) =>
+    Math.hypot(wx - current.x, wz - current.z) < Math.hypot(wx - closest.x, wz - closest.z) ? current : closest
+  , TOWNS[0]);
   enterableBuildings.push({
-    wx, wz, width, depth, roofGroup, title, isTwoStory: false
+    wx, wz, width, depth, roofGroup, title, role, rotY, townId: town.id, isTwoStory: false
   });
 }
 // ==================== สร้างโรงเตี๋ยม 2 ชั้น (2-Story Grand Inn) พร้อมห้องพัก กุญแจห้อง ตู้เก็บของ เตียง หน้าต่าง เก้าอี้ และประตู! ====================
 function buildTwoStoryInnBuilding(spec) {
-  const { wx, wz, rotY = Math.PI, townName = '' } = spec;
+  const { rotY = Math.PI, townName = '', townId = 0 } = spec;
   const width = 18.0;
   const depth = 14.0;
+  const placement = resolveBuildingPlacement({ ...spec, width, depth, title: `โรงเตี๊ยม ${townName}` });
+  if (!placement) return;
+  const { wx, wz } = placement;
   const hFloor1 = 4.5;
   const hFloor2 = 4.2;
   const totalH = hFloor1 + hFloor2;
@@ -1511,16 +1811,16 @@ function buildTwoStoryInnBuilding(spec) {
   );
 
   // 2) แผ่นพื้นชานพักบันไดฝั่งซ้ายด้านหลัง (x = -8.9 ถึง -0.6, z = -6.9 ถึง -3.8) เชื่อมกับยอดบันไดพอดี
-  const f2StairLandingSlab = new THREE.Mesh(new THREE.BoxGeometry(8.3, 0.24, 3.1), floor2Mat);
-  f2StairLandingSlab.position.set(-4.75, -0.10, -5.35);
+  const f2StairLandingSlab = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.24, 3.1), floor2Mat);
+  f2StairLandingSlab.position.set(1.5, -0.10, -5.35);
   f2StairLandingSlab.receiveShadow = true;
   floor2Group.add(f2StairLandingSlab);
-  const wLandingSlab = toWorld(-4.75, -5.35);
+  const wLandingSlab = toWorld(1.5, -5.35);
   registerBoxCollider(
     worldColliders,
     wLandingSlab.x, wLandingSlab.z,
-    isRotated90 ? 3.1 : 8.3,
-    isRotated90 ? 8.3 : 3.1,
+    isRotated90 ? 3.1 : 4.2,
+    isRotated90 ? 4.2 : 3.1,
     wy + hFloor1,
     true,
     wy + hFloor1 - 0.65
@@ -1602,7 +1902,8 @@ function buildTwoStoryInnBuilding(spec) {
   const floor2PropsGroup = new THREE.Group();
   worldGroup.add(floor2PropsGroup);
 
-  roomSpecs.forEach((rm) => {
+  roomSpecs.forEach((roomSpec) => {
+    const rm = { ...roomSpec, roomId: `${townId}-${roomSpec.roomId}` };
     const rDoorW = 1.65;
     const rDoorH = 2.65;
     const doorLocalX = rm.centerX;
@@ -1771,9 +2072,11 @@ function buildTwoStoryInnBuilding(spec) {
 
   const lightF1 = new THREE.PointLight(0xfff4e6, 4.5, 36, 0.8);
   lightF1.position.set(0, hFloor1 * 0.82, 0);
+  lightF1.visible = false;
   floor1Group.add(lightF1);
   const lightF2 = new THREE.PointLight(0xfff4e6, 4.0, 36, 0.8);
   lightF2.position.set(0, hFloor2 * 0.82, 0);
+  lightF2.visible = false;
   floor2Group.add(lightF2);
   cityNightLights.push({ light: lightF1, wx, wz, maxIntensity: 4.5, isIndoorLight: true });
   cityNightLights.push({ light: lightF2, wx, wz, maxIntensity: 4.0, isIndoorLight: true });
@@ -1840,10 +2143,14 @@ function buildTwoStoryInnBuilding(spec) {
 
   worldGroup.add(innGroup);
   const f2Colliders = worldColliders.slice(-2); // หรือเก็บไว้ตอนสร้าง wRoomsSlab / wLandingSlab
+  const town = TOWNS.reduce((closest, current) =>
+    Math.hypot(wx - current.x, wz - current.z) < Math.hypot(wx - closest.x, wz - closest.z) ? current : closest
+  , TOWNS[0]);
   enterableBuildings.push({
     wx, wz, width, depth, wy, hFloor1, totalH,
     floor1Group, floor2Group, floor2PropsGroup, roofGroup,
     title: 'โรงเตี๋ยมนักเดินทาง 2 ชั้น',
+    role: 'inn', rotY, townId: town.id,
     isTwoStory: true
   });
 }
@@ -1853,44 +2160,132 @@ function spawnAnimatedCityCarriage(town, orbitRadius, startAngle, speed, labelTi
   const woodMat = createAnimeMaterial({ color: 0x78350f, roughness: 0.65 });
   const canopyMat = createAnimeMaterial({ color: 0x991b1b, roughness: 0.55 });
   const goldMat = createAnimeMaterial({ color: 0xfbbf24, metalness: 0.8, roughness: 0.25 });
-  const horseMat = createAnimeMaterial({ color: 0x92400e, roughness: 0.7 });
-  // ตัวรถม้า (Cabin & Chassis)
-  const base = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.45, 3.8), woodMat);
-  base.position.y = 0.85;
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.85, 2.6), canopyMat);
-  cabin.position.set(0, 1.95, -0.35);
-  const trim = new THREE.Mesh(new THREE.BoxGeometry(2.32, 0.18, 2.7), goldMat);
-  trim.position.set(0, 2.85, -0.35);
-  base.castShadow = true; cabin.castShadow = true;
-  cGroup.add(base, cabin, trim);
-  // ล้อรถม้าทั้ง 4 ล้อ
+  const horseMat = createAnimeMaterial({ color: 0x78350f, roughness: 0.72 });
+  const darkLeatherMat = createAnimeMaterial({ color: 0x292524, roughness: 0.78 });
+  const cushionMat = createAnimeMaterial({ color: 0x7f1d1d, roughness: 0.86 });
+  const addCarriagePart = (geometry, material, position, rotation = null) => {
+    const part = new THREE.Mesh(geometry, material);
+    part.position.set(...position);
+    if (rotation) part.rotation.set(...rotation);
+    part.castShadow = true;
+    part.receiveShadow = true;
+    cGroup.add(part);
+    return part;
+  };
+
+  addCarriagePart(new THREE.BoxGeometry(2.35, 0.28, 3.75), darkLeatherMat, [0, 0.83, -0.12]);
+  addCarriagePart(new THREE.BoxGeometry(2.22, 0.16, 2.95), woodMat, [0, 1.22, -0.28]);
+  addCarriagePart(new THREE.BoxGeometry(2.2, 0.9, 0.16), woodMat, [0, 1.77, -1.78]);
+  addCarriagePart(new THREE.BoxGeometry(0.16, 0.86, 2.65), woodMat, [-1.04, 1.72, -0.4]);
+  addCarriagePart(new THREE.BoxGeometry(0.16, 0.86, 2.65), woodMat, [1.04, 1.72, -0.4]);
+  addCarriagePart(new THREE.BoxGeometry(2.05, 0.68, 0.16), woodMat, [0, 1.61, 0.95]);
+  addCarriagePart(new THREE.BoxGeometry(1.5, 0.2, 0.82), cushionMat, [0, 1.48, -0.58]);
+  addCarriagePart(new THREE.BoxGeometry(1.5, 0.8, 0.17), cushionMat, [0, 1.91, -1.0]);
+  addCarriagePart(new THREE.BoxGeometry(2.65, 0.16, 2.8), canopyMat, [0, 3.18, -0.42]);
+  addCarriagePart(new THREE.BoxGeometry(2.72, 0.1, 2.88), goldMat, [0, 3.08, -0.42]);
+  [[-1.08, -1.55], [1.08, -1.55], [-1.08, 0.72], [1.08, 0.72]].forEach(([x, z]) => {
+    addCarriagePart(new THREE.CylinderGeometry(0.065, 0.08, 1.82, 8), goldMat, [x, 2.18, z]);
+  });
+  addCarriagePart(new THREE.BoxGeometry(2.4, 0.12, 3.0), goldMat, [0, 2.22, -0.4]);
+
+  // Carriage wheels have timber spokes, iron rims and gold hubs.
   const wheels = [];
-  [[-1.22, 1.1], [1.22, 1.1], [-1.22, -1.2], [1.22, -1.2]].forEach(([wx, wz]) => {
-    const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.62, 0.18, 16), goldMat);
+  [[-1.26, 1.1], [1.26, 1.1], [-1.26, -1.2], [1.26, -1.2]].forEach(([wx, wz]) => {
+    const wheel = new THREE.Group();
     wheel.rotation.z = Math.PI / 2;
-    wheel.position.set(wx, 0.62, wz);
+    wheel.position.set(wx, 0.72, wz);
     cGroup.add(wheel);
+    const wheelDisk = new THREE.Mesh(new THREE.CylinderGeometry(0.69, 0.69, 0.22, 20), woodMat);
+    wheelDisk.castShadow = true;
+    wheel.add(wheelDisk);
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.64, 0.065, 8, 24), goldMat);
+    rim.rotation.x = Math.PI / 2;
+    rim.castShadow = true;
+    wheel.add(rim);
+    for (let spokeIndex = 0; spokeIndex < 10; spokeIndex++) {
+      const angle = (spokeIndex / 10) * Math.PI * 2;
+      const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.72), woodMat);
+      spoke.position.set(Math.sin(angle) * 0.32, 0, Math.cos(angle) * 0.32);
+      spoke.rotation.y = angle;
+      spoke.castShadow = true;
+      wheel.add(spoke);
+    }
+    const hub = new THREE.Mesh(new THREE.SphereGeometry(0.18, 12, 10), goldMat);
+    hub.scale.set(0.58, 1, 1);
+    hub.castShadow = true;
+    wheel.add(hub);
     wheels.push(wheel);
   });
-  // ม้าลากรถด้านหน้า
+
+  // Refined, articulated horse with a visible bridle and harness.
   const horseGroup = new THREE.Group();
   horseGroup.position.set(0, 0, 3.3);
-  const hBody = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.95, 1.9), horseMat);
-  hBody.position.y = 1.15;
-  const hNeck = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.95, 0.55), horseMat);
-  hNeck.position.set(0, 1.65, 0.78);
-  hNeck.rotation.x = 0.35;
-  const hHead = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.42, 0.75), horseMat);
-  hHead.position.set(0, 2.02, 1.15);
-  horseGroup.add(hBody, hNeck, hHead);
+  const horsePart = (geometry, material, position, scale = [1, 1, 1], rotation = null) => {
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(...position);
+    mesh.scale.set(...scale);
+    if (rotation) mesh.rotation.set(...rotation);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    horseGroup.add(mesh);
+    return mesh;
+  };
+  horsePart(new THREE.SphereGeometry(0.72, 16, 12), horseMat, [0, 1.2, 0], [0.72, 0.72, 1.45]);
+  horsePart(new THREE.SphereGeometry(0.42, 14, 12), horseMat, [0, 1.62, 0.84], [0.82, 1.48, 0.88], [0.35, 0, 0]);
+  horsePart(new THREE.SphereGeometry(0.32, 14, 12), horseMat, [0, 2.12, 1.43], [0.72, 0.78, 1.0], [0.2, 0, 0]);
+  horsePart(new THREE.SphereGeometry(0.2, 12, 10), horseMat, [0, 1.99, 1.72], [0.82, 0.62, 0.85]);
+  const maneMat = createAnimeMaterial({ color: 0x1c1917, roughness: 0.82 });
+  horsePart(new THREE.ConeGeometry(0.24, 0.85, 8), maneMat, [0, 2.1, 0.92], [1, 1, 0.8], [Math.PI / 2.5, 0, 0]);
+  [-1, 1].forEach(side => {
+    horsePart(new THREE.ConeGeometry(0.09, 0.38, 7), maneMat, [side * 0.18, 2.48, 1.34], [1, 1, 0.8], [0.18, 0, side * 0.28]);
+    horsePart(new THREE.SphereGeometry(0.055, 8, 8), darkLeatherMat, [side * 0.23, 2.19, 1.55]);
+    horsePart(new THREE.SphereGeometry(0.05, 8, 8), goldMat, [side * 0.235, 2.2, 1.59]);
+  });
+  const harness = horsePart(new THREE.TorusGeometry(0.54, 0.055, 8, 18, Math.PI), darkLeatherMat, [0, 1.38, 0.3], [1, 1, 1], [Math.PI / 2, 0, 0]);
+  harness.rotation.z = Math.PI;
   const horseLegs = [];
   [[-0.32, 0.68], [0.32, 0.68], [-0.32, -0.68], [0.32, -0.68]].forEach(([lx, lz]) => {
-    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.10, 0.95, 10), horseMat);
-    leg.position.set(lx, 0.48, lz);
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.085, 0.95, 10), horseMat);
+    leg.position.set(lx, 0.57, lz);
+    leg.castShadow = true;
     horseGroup.add(leg);
     horseLegs.push(leg);
   });
   cGroup.add(horseGroup);
+
+  const driver = new ArticulatedCharacter3D({
+    gender: 'male',
+    bodyType: 'male_hero',
+    skinColor: '#f2c9a5',
+    hairStyle: 'short_layered',
+    hairColor: '#292524',
+    eyeColor: '#78350f',
+    expression: 'smile',
+    topStyle: 'noble_coat',
+    bottomStyle: 'pants',
+    primaryColor: '#1e3a8a',
+    secondaryColor: '#fbbf24',
+    heightScale: 0.98,
+    weaponId: 'sword_iron'
+  });
+  driver.root.position.set(0, 1.2, 1.48);
+  driver.root.rotation.y = 0;
+  driver.root.userData = { isNPC: true, npcName: 'คนขับรถม้า', role: 'carriage_driver' };
+  driver.animState = 'sit';
+  cGroup.add(driver.root);
+
+  [-0.9, 0.9].forEach(x => {
+    const lamp = new THREE.Mesh(
+      new THREE.SphereGeometry(0.13, 12, 10),
+      new THREE.MeshStandardMaterial({ color: 0xfff7cc, emissive: 0xffb74d, emissiveIntensity: 2.4 })
+    );
+    lamp.position.set(x, 2.08, 1.1);
+    cGroup.add(lamp);
+    const light = new THREE.PointLight(0xffc66d, 14, 12, 1.5);
+    light.position.set(x, 2.08, 1.16);
+    cGroup.add(light);
+  });
+
   const initX = town.x + Math.cos(startAngle) * orbitRadius;
   const initZ = town.z + Math.sin(startAngle) * orbitRadius;
   const initY = worldNoise.getHeight(initX, initZ);
@@ -1903,19 +2298,25 @@ function spawnAnimatedCityCarriage(town, orbitRadius, startAngle, speed, labelTi
     speed,
     wheels,
     horseLegs,
-    horseGroup
+    horseGroup,
+    driver
   };
   cGroup.userData = { isCarriage: true, carriageRef: carriageObj, title: labelTitle };
   worldGroup.add(cGroup);
   animatedCarriages.push(carriageObj);
   registerFloatingLabel(
     cGroup,
-    `<div class="px-2.5 py-0.5 rounded-full bg-amber-950/90 border border-amber-400/70 text-[10px] text-amber-200 font-bold shadow">🐎 ${labelTitle} [คลิกขึ้น/ลงรถม้า]</div>`,
+    `<div class="px-2.5 py-0.5 rounded-full bg-amber-950/90 border border-amber-400/70 text-[10px] text-amber-200 font-bold shadow">🐎 ${labelTitle} [คลิกเพื่อเลือกเมือง/ร้านค้า]</div>`,
     3.3
+  );
+  registerFloatingLabel(
+    driver.root,
+    `<div class="px-2 py-0.5 rounded-full bg-slate-950/90 border border-sky-400/70 text-[9px] text-sky-200 font-bold shadow">🧑‍✈️ คนขับรถม้า</div>`,
+    2.2
   );
 }
 // สร้างมหานครขนาดใหญ่ทั้ง 4 เมือง พร้อม 4 ย่านหลัก อาคารเดินเข้าได้ ประตูเมือง 4 ทิศ โคมไฟส่องสว่าง และรถม้า!
-function buildAllGrandCities() {
+async function buildAllGrandCities() {
   const chatterLines = [
     "มหานครเอเธลการ์ดกว้างใหญ่มาก ลองนั่งรถม้าชมเมืองดูสิ!",
     "ตอนกลางคืนโคมไฟถนนตามย่านการค้าและย่านขุนนางสว่างสวยมากเลย!",
@@ -1923,15 +2324,17 @@ function buildAllGrandCities() {
     "ย่านการค้าทางทิศตะวันออกมีตลาดและร้านตีเหล็กคึกคักสุดๆ!",
     "กิลด์นักผจญภัยกำลังเปิดรับสมัครผู้กล้าอยู่ด้านในอาคารเลย!"
   ];
-  TOWNS.forEach((town) => {
+  for (let townIndex = 0; townIndex < TOWNS.length; townIndex++) {
+    const town = TOWNS[townIndex];
+    setLoadingProgress(18 + (townIndex / TOWNS.length) * 20, `กำลังสร้างเมือง ${townIndex + 1}/${TOWNS.length}...`);
     const R = town.radius; // 88 - 96 เมตร (มหานครขนาดใหญ่)
-    buildRealisticGrandTown(town, worldNoise, worldGroup, worldColliders, streetLampMaterials, streetLampGlowDiscs, interactiveSeats);
+    await buildRealisticGrandTown(town, worldNoise, worldGroup, worldColliders, streetLampMaterials, streetLampGlowDiscs, interactiveSeats, streetLampPointLights);
     const baseY = worldNoise.getHeight(town.x, town.z);
     // 1. จุดพักผิงไฟนักเดินทางในสวนด้านข้างอย่างเป็นระเบียบ (ไม่กีดขวางถนนหลัก)
     const plazaCampfire = createVolumetricCampfire(1.0, true);
-    plazaCampfire.position.set(town.x - 24.0, baseY, town.z + 2.5);
+    plazaCampfire.position.set(town.x - 18.0, baseY, town.z + 4.0);
     worldGroup.add(plazaCampfire);
-    worldColliders.push({ x: town.x - 24.0, z: town.z + 2.5, radius: 1.0, topY: baseY + 1.2, stepable: false });
+    worldColliders.push({ x: town.x - 18.0, z: town.z + 4.0, radius: 1.0, topY: baseY + 1.2, stepable: false });
     animatedCampfires.forEach((cf) => {
       if (!cf._enhanced) {
         cf._enhanced = true;
@@ -1971,7 +2374,7 @@ function buildAllGrandCities() {
       npcSpec: { name: 'เอลีน่า (หัวหน้ากิลด์)', gender: 'female', outfit: 'paladin_armor', primary: '#f59e0b', hair: 'long_flowing', weapon: 'sword_flame' }
     });
     buildTwoStoryInnBuilding({
-      wx: town.x - 36, wz: town.z + 20, rotY: Math.PI, townName: town.name
+      wx: town.x - 36, wz: town.z + 20, rotY: Math.PI, townName: town.name, townId: town.id
     });
     buildEnterableBuilding({
       wx: town.x + 38, wz: town.z - 16, width: 13, depth: 11, height: 5.2,
@@ -1988,20 +2391,29 @@ function buildAllGrandCities() {
     // 5. สร้างตึกแถว คฤหาสน์ขุนนาง และแผงลอยตลาดในแต่ละย่านให้เมืองดูยิ่งใหญ่อลังการ
     const extraDistrictBuildings = [
       // ย่านขุนนาง (ทิศเหนือ)
-      { x: -22, z: -56, w: 12, d: 9, h: 6.5, wall: 0xf8fafc, roof: 0x6d28d9 },
-      { x: 22,  z: -56, w: 12, d: 9, h: 6.5, wall: 0xf8fafc, roof: 0x4f46e5 },
-      { x: 0,   z: -66, w: 16, d: 11, h: 7.5, wall: 0xfef9c3, roof: 0xd97706 },
+      { x: -28, z: -94, w: 12, d: 9, h: 6.5, wall: 0xf8fafc, roof: 0x6d28d9 },
+      { x: 28,  z: -94, w: 12, d: 9, h: 6.5, wall: 0xf8fafc, roof: 0x4f46e5 },
+      { x: 0,   z: -101, w: 16, d: 11, h: 7.5, wall: 0xfef9c3, roof: 0xd97706 },
       // ย่านการค้า (ทิศตะวันออก)
-      { x: 62,  z: -24, w: 10, d: 8, h: 4.8, wall: 0xfef3c7, roof: 0x059669 },
-      { x: 62,  z: 24,  w: 10, d: 8, h: 4.8, wall: 0xfef3c7, roof: 0xd97706 },
+      { x: 94,  z: -28, w: 10, d: 8, h: 4.8, wall: 0xfef3c7, roof: 0x059669 },
+      { x: 94,  z: 28,  w: 10, d: 8, h: 4.8, wall: 0xfef3c7, roof: 0xd97706 },
       // ย่านพักอาศัยทั่วไป (ทิศตะวันตกและทิศใต้)
-      { x: -62, z: -24, w: 9,  d: 8, h: 4.6, wall: 0xf1f5f9, roof: 0x0284c7 },
-      { x: -62, z: 24,  w: 9,  d: 8, h: 4.6, wall: 0xf1f5f9, roof: 0xdc2626 },
-      { x: -24, z: 56,  w: 10, d: 8, h: 4.8, wall: 0xffedd5, roof: 0xb45309 },
-      { x: 24,  z: 56,  w: 10, d: 8, h: 4.8, wall: 0xffedd5, roof: 0x15803d }
+      { x: -94, z: -28, w: 9,  d: 8, h: 4.6, wall: 0xf1f5f9, roof: 0x0284c7 },
+      { x: -94, z: 28,  w: 9,  d: 8, h: 4.6, wall: 0xf1f5f9, roof: 0xdc2626 },
+      { x: -30, z: 94,  w: 10, d: 8, h: 4.8, wall: 0xffedd5, roof: 0xb45309 },
+      { x: 30,  z: 94,  w: 10, d: 8, h: 4.8, wall: 0xffedd5, roof: 0x15803d }
     ];
     extraDistrictBuildings.forEach(b => {
-      const bx = town.x + b.x, bz = town.z + b.z;
+      const requestedX = town.x + b.x, requestedZ = town.z + b.z;
+      const placement = resolveBuildingPlacement({
+        wx: requestedX,
+        wz: requestedZ,
+        width: b.w,
+        depth: b.d,
+        title: `อาคารย่านเมือง ${town.name}`
+      });
+      if (!placement) return;
+      const bx = placement.wx, bz = placement.wz;
       const by = worldNoise.getHeight(bx, bz);
       const meshG = new THREE.Group();
       meshG.position.set(bx, by, bz);
@@ -2025,7 +2437,7 @@ function buildAllGrandCities() {
     ].forEach(dir => buildGrandCityGate(town, dir, R - 6));
     // 7. เสกรถม้าเคลื่อนที่วิ่งวนรอบถนนวงแหวนชั้นในและชั้นนอกของมหานคร
     spawnAnimatedCityCarriage(town, 28, 0.2, 4.2, 'รถม้าสายใจกลางเมือง');
-    spawnAnimatedCityCarriage(town, 50, Math.PI, 4.8, 'รถม้าสายย่านการค้า-ขุนนาง');
+    spawnAnimatedCityCarriage(town, 71.5, Math.PI, 4.8, 'รถม้าสายย่านการค้า-ขุนนาง');
     // 8. NPC ชาวเมือง ทหารยาม ขุนนาง และพ่อค้า (อัตราส่วน ชาย 50% : หญิง 50% พร้อมทรงผมและชุดผู้ชายแท้ๆ!)
     const walkerSpecs = [
       { title: '🛡️ แม่ทัพอัศวินตรวจการณ์', gender: 'male', outfit: 'paladin_armor', top: 'noble_coat', hair: 'short_layered', bangs: 'male_parted', primary: '#1d4ed8', weapon: 'sword_flame', radius: 22, speed: 2.6, startAng: 0 },
@@ -2103,7 +2515,14 @@ function buildAllGrandCities() {
     ].forEach(([ox, oz, type]) => {
       spawnFarmingNodeAt(town.x + ox, town.z + oz, type);
     });
-  });
+    await waitForRenderFrame();
+  }
+
+  // สร้างรูปปั้นประจำเมืองไว้กลางลานของแต่ละเมือง
+  replaceTownCrystalsWithStatues(TOWNS, animatedTownCrystals, worldGroup, worldNoise, worldColliders);
+  // ปลดล็อกประตูเมืองทั้ง 4 ทิศ + สร้างถ้ำเขาวงกตขนาดใหญ่
+  unlockAndAnimateCityGates(TOWNS, worldGroup, worldNoise, worldColliders);
+  buildDeepLabyrinthCave(worldGroup, worldNoise, worldColliders, registerBoxCollider, registerFloatingLabel);
 }
 // ============================================================================
 // 5. ข้อมูลตัวละครผู้เล่น (ตั้งค่าเริ่มต้นให้ตรงกับภาพอนิเมะอ้างอิง: โครงหน้า V-Shape, ตาสีอำพันทอง, ผมดำน้ำตาลเข้มปอยหวาน, ชุดกะลาสีโบว์แดงกระโปรงสก๊อต)
@@ -2163,7 +2582,9 @@ let playerStats = {
   atk: 40, matk: 12, def: 16, spd: 12,
   foodBuffAtk: 0, foodBuffHp: 0,
   gold: 300, hpPots: 5, mpPots: 3,
-  ownedWeapons: ['sword_iron', 'staff_oak', 'bow_hunter', 'shield_knight', 'tome_holy'],
+  ownedWeapons: ['sword_iron', 'staff_oak', 'bow_hunter', 'shield_knight', 'tome_holy', 'gloves_brawler'],
+  ownedFashion: ['f_sailor', 'h_none', 'w_none', 'fx_none'],
+  equippedFashion: ['f_sailor'],
   inventory: {
     mithril_ore: 2,
     moon_herb: 2,
@@ -2172,6 +2593,7 @@ let playerStats = {
     monster_core: 1
   },
   roomKeys: [],
+  roomRentals: {},
   roomStorage: {
     gold: 100,
     mithril_ore: 1,
@@ -2183,12 +2605,17 @@ let playerStats = {
   wellRestedBonus: 0,
   questKills: 0, questTarget: 3, questStep: 1
 };
+ensureFashionState(playerStats, currentConfig);
 const playerPhysics = {
   vx: 0, vy: 0, vz: 0,
   isGrounded: true,
   isInWater: false,
   jumpCount: 0,
   dashCooldown: 0,
+  dashTimer: 0,
+  dashInvulnerability: 0,
+  dashDirectionX: 0,
+  dashDirectionZ: 0,
   prevRotY: 0,
   targetRotY: 0
 };
@@ -2373,6 +2800,10 @@ function renderClassAndWeaponSelector() {
       currentConfig.classId = cls.id;
       if (cls.allowedWeapon !== 'any') currentConfig.weaponId = cls.defaultWeapon;
       rebuildPreviewCharacter();
+      recalculateStats();
+      playerStats.hp = playerStats.maxHp;
+      playerStats.mp = playerStats.maxMp;
+      updateHUD();
       renderClassAndWeaponSelector();
     };
     classListEl.appendChild(btn);
@@ -2392,7 +2823,7 @@ function renderClassAndWeaponSelector() {
   `;
   const wListEl = document.getElementById('weapon-select-list');
   wListEl.innerHTML = '';
-  ['sword_iron', 'staff_oak', 'bow_hunter', 'shield_knight', 'tome_holy'].forEach(wid => {
+  Object.keys(WEAPONS).forEach(wid => {
     const w = WEAPONS[wid];
     const canUse = curCls.allowedWeapon === 'any' || curCls.allowedWeapon === w.type;
     const selected = currentConfig.weaponId === wid;
@@ -2409,6 +2840,7 @@ function renderClassAndWeaponSelector() {
       sound.sfxClick();
       currentConfig.weaponId = wid;
       rebuildPreviewCharacter();
+      recalculateStats();
       renderClassAndWeaponSelector();
     };
     wListEl.appendChild(btn);
@@ -2685,8 +3117,8 @@ function renderCreatorTabContent() {
       </div>
       <div class="pt-2 border-t border-slate-700/70">
         <label class="block text-slate-300 mb-1">ปีก & เครื่องประดับ</label>
-        <div class="grid grid-cols-3 gap-1.5 mb-2">
-          ${[['none', 'ไม่ใส่'], ['angel_wings', '🪽 ปีกสวรรค์'], ['halo', '😇 วงแหวนเทพ']].map(([v, l]) => `
+        <div class="grid grid-cols-2 gap-1.5 mb-2">
+          ${[['none', 'ไม่ใส่'], ['angel_wings', '🦋 ปีกผีเสื้อ'], ['angel_wings_white', '🪽 ปีกนางฟ้าขาว'], ['halo', '😇 วงแหวนเทพ']].map(([v, l]) => `
             <button data-acc="${v}" class="acc-btn py-1.5 rounded-xl border ${c.accessory === v ? 'bg-amber-500 text-slate-950 font-bold border-amber-300' : 'bg-slate-900 border-slate-700'}">${l}</button>
           `).join('')}
         </div>
@@ -2916,6 +3348,70 @@ renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 //    แก้ปัญหาผู้เล่นอยู่ห้องเดียวกัน (World Seed เดียวกัน) แต่มองไม่เห็นกัน 100%!
 // ============================================================================
 const authMsg = document.getElementById('auth-msg');
+const loadingScreen = document.getElementById('screen-loading');
+const loadingStatus = document.getElementById('loading-status');
+const loadingProgress = document.getElementById('loading-progress');
+const loadingPercent = document.getElementById('loading-percent');
+
+function setLoadingProgress(percent, message) {
+  const value = Math.max(0, Math.min(100, Math.round(percent)));
+  loadingStatus.textContent = message;
+  loadingProgress.style.width = `${value}%`;
+  loadingPercent.textContent = `${value}%`;
+}
+
+function waitForRenderFrame() {
+  return new Promise(resolve => requestAnimationFrame(resolve));
+}
+
+async function beginWorldLoading() {
+  document.body.classList.remove('in-world');
+  window.__syncMobileControls?.(false);
+  loadingScreen.classList.remove('hidden');
+  setLoadingProgress(4, 'กำลังเตรียมฉากและระบบแสง...');
+  document.getElementById('screen-auth').classList.add('hidden');
+  document.getElementById('screen-creator').classList.add('hidden');
+  document.getElementById('screen-hud').classList.add('hidden');
+  sculptTooltip.classList.add('hidden');
+  creatorPedestal.visible = false;
+  gameState = 'loading';
+  await waitForRenderFrame();
+  await waitForRenderFrame();
+}
+
+async function finishWorldLoading(spawnX, spawnZ) {
+  worldGroup.visible = true;
+  setLoadingProgress(43, 'กำลังโหลดภูมิประเทศรอบจุดเกิด...');
+  const centerChunkX = Math.floor(spawnX / CHUNK_SIZE);
+  const centerChunkZ = Math.floor(spawnZ / CHUNK_SIZE);
+  const nearbyChunks = [
+    [centerChunkX, centerChunkZ],
+    [centerChunkX - 1, centerChunkZ],
+    [centerChunkX + 1, centerChunkZ],
+    [centerChunkX, centerChunkZ - 1],
+    [centerChunkX, centerChunkZ + 1]
+  ];
+  for (let i = 0; i < nearbyChunks.length; i++) {
+    const [cx, cz] = nearbyChunks[i];
+    await generateChunk(cx, cz);
+    setLoadingProgress(43 + ((i + 1) / nearbyChunks.length) * 39, 'กำลังเตรียมพื้นดินและพื้นที่รอบจุดเกิด...');
+    await waitForRenderFrame();
+  }
+
+  const groundY = worldNoise.getHeight(spawnX, spawnZ);
+  camera.position.set(spawnX, groundY + 7, spawnZ + 12);
+  camera.lookAt(spawnX, groundY + 1, spawnZ);
+  setLoadingProgress(87, 'กำลังเตรียมโมเดลและแสงให้พร้อม...');
+  await waitForRenderFrame();
+  setLoadingProgress(100, 'พร้อมออกเดินทางแล้ว!');
+  gameState = 'world';
+  document.body.classList.add('in-world');
+  window.__syncMobileControls?.(true);
+  document.getElementById('screen-hud').classList.remove('hidden');
+  await waitForRenderFrame();
+  loadingScreen.classList.add('hidden');
+}
+
 async function enterCreatorScreen(username, savedData) {
   currentUsername = sanitizeKey(username);
   myClientId = `${currentUsername}_${SESSION_SUFFIX}`;
@@ -2930,13 +3426,25 @@ async function enterCreatorScreen(username, savedData) {
         ...playerStats,
         ...savedData.stats,
         inventory: { ...playerStats.inventory, ...(savedData.stats.inventory || {}) },
+        ownedFashion: Array.isArray(savedData.stats.ownedFashion) ? savedData.stats.ownedFashion : [],
+        equippedFashion: Array.isArray(savedData.stats.equippedFashion) ? savedData.stats.equippedFashion : null,
         roomKeys: Array.isArray(savedData.stats.roomKeys) ? savedData.stats.roomKeys : [],
+        roomRentals: savedData.stats.roomRentals || {},
         roomStorage: { ...playerStats.roomStorage, ...(savedData.stats.roomStorage || {}) },
         cooldowns: savedData.stats.cooldowns || { monsters: {}, nodes: {} },
         savedSpawn: savedData.stats.savedSpawn || null
       };
+      playerStats.roomKeys = playerStats.roomKeys.map(id => {
+        if (String(id).includes('-')) return String(id);
+        const qualifiedId = `0-${id}`;
+        if (!playerStats.roomRentals[qualifiedId]) {
+          playerStats.roomRentals[qualifiedId] = { expiresAtGameDay: getCurrentGameDay() + 1 };
+        }
+        return qualifiedId;
+      });
     }
   }
+  ensureFashionState(playerStats, currentConfig);
 
   sound.startBGM();
 
@@ -2986,6 +3494,113 @@ document.getElementById('btn-quickplay').onclick = () => {
 const remotePlayers = new Map();
 let activeWorldKey = null;
 let localBroadcastChannel = null;
+let myPartyId = null;
+let partyInviteTo = null;
+let partyInvitePulse = 0;
+let partyDisbandId = null;
+let partyDisbandPulse = 0;
+let pendingPartyInvite = null;
+
+function isLocalPartyLeader() {
+  return !!myPartyId && myPartyId.startsWith(`${myClientId}_`);
+}
+
+function renderPartyPanel() {
+  const list = document.getElementById('party-members-list');
+  if (!list) return;
+  list.replaceChildren();
+  const status = document.getElementById('party-status');
+  const leaveButton = document.getElementById('btn-leave-party');
+  const teammates = Array.from(remotePlayers.values()).filter(remote =>
+    myPartyId && remote.partyId === myPartyId
+  );
+  const memberCount = teammates.length + (myPartyId ? 1 : 0);
+  if (status) status.textContent = myPartyId
+    ? `ทีม ${memberCount} คน${isLocalPartyLeader() ? ' • หัวหน้าทีม' : ''}`
+    : 'ยังไม่ได้เข้าร่วมทีม';
+  if (leaveButton) leaveButton.classList.toggle('hidden', !myPartyId);
+
+  const addPlayerRow = (name, stateLabel, actionLabel, onAction) => {
+    const row = document.createElement('div');
+    row.className = 'flex items-center justify-between gap-2 rounded-lg bg-slate-900/70 px-2 py-1.5';
+    const label = document.createElement('span');
+    label.className = 'min-w-0 truncate text-slate-100';
+    label.textContent = `${stateLabel} ${name}`;
+    row.appendChild(label);
+    if (actionLabel && onAction) {
+      const action = document.createElement('button');
+      action.className = 'shrink-0 rounded-md bg-indigo-500/25 px-2 py-1 text-[10px] font-bold text-indigo-100 hover:bg-indigo-500/50';
+      action.textContent = actionLabel;
+      action.addEventListener('click', onAction);
+      row.appendChild(action);
+    }
+    list.appendChild(row);
+  };
+
+  addPlayerRow(
+    currentConfig.name || 'ฉัน',
+    myPartyId ? '🟢' : '🟡',
+    isLocalPartyLeader() ? 'หัวหน้าทีม' : myPartyId ? 'สมาชิก' : 'คนเดียว',
+    null
+  );
+  remotePlayers.forEach(remote => {
+    const isTeammate = !!myPartyId && remote.partyId === myPartyId;
+    const inOtherParty = !!remote.partyId && remote.partyId !== myPartyId;
+    addPlayerRow(
+      remote.displayName,
+      isTeammate ? '🟢' : inOtherParty ? '🔒' : '⚪',
+      isTeammate ? 'สมาชิก' : inOtherParty ? 'ทีมอื่น' : 'เชิญ',
+      isTeammate || inOtherParty ? null : () => invitePlayerToParty(remote.clientId)
+    );
+  });
+  if (remotePlayers.size === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'px-2 py-1 text-[10px] text-slate-400';
+    empty.textContent = 'ยังไม่มีผู้เล่นออนไลน์ในโลกนี้';
+    list.appendChild(empty);
+  }
+}
+
+function invitePlayerToParty(clientId) {
+  const remote = remotePlayers.get(clientId);
+  if (!remote || (remote.partyId && remote.partyId !== myPartyId)) return;
+  if (!myPartyId) myPartyId = `${myClientId}_${Date.now()}`;
+  partyInviteTo = clientId;
+  partyInvitePulse = Date.now();
+  addLog(`👥 ส่งคำเชิญปาร์ตี้ให้ ${remote.displayName}`, 'text-indigo-200');
+  renderPartyPanel();
+  broadcastMyStateToRTDB();
+}
+
+function acceptPartyInvite() {
+  if (!pendingPartyInvite) return;
+  if (myPartyId && myPartyId !== pendingPartyInvite.partyId) {
+    addLog('⚠️ ออกจากปาร์ตี้ปัจจุบันก่อนเข้าร่วมทีมใหม่', 'text-rose-300');
+    return;
+  }
+  myPartyId = pendingPartyInvite.partyId;
+  addLog(`👥 เข้าร่วมปาร์ตี้ของ ${pendingPartyInvite.displayName} แล้ว`, 'text-indigo-200');
+  pendingPartyInvite = null;
+  document.getElementById('party-invite-prompt').classList.add('hidden');
+  renderPartyPanel();
+  broadcastMyStateToRTDB();
+}
+
+function declinePartyInvite() {
+  pendingPartyInvite = null;
+  document.getElementById('party-invite-prompt').classList.add('hidden');
+}
+
+function leaveParty() {
+  if (!myPartyId) return;
+  partyDisbandId = isLocalPartyLeader() ? myPartyId : null;
+  partyDisbandPulse = partyDisbandId ? Date.now() : 0;
+  addLog(isLocalPartyLeader() ? '👥 ยุบปาร์ตี้แล้ว' : '👥 ออกจากปาร์ตี้แล้ว', 'text-indigo-200');
+  myPartyId = null;
+  partyInviteTo = null;
+  renderPartyPanel();
+  broadcastMyStateToRTDB();
+}
 // อัปเดตหรือสร้างตัวละครผู้เล่นออนไลน์คนอื่นในห้องเดียวกัน
 function upsertRemotePlayerState(clientId, pData) {
   if (!clientId || clientId === myClientId) return;
@@ -2996,6 +3611,8 @@ function upsertRemotePlayerState(clientId, pData) {
   const py = Number.isFinite(Number(pData.y)) ? Number(pData.y) : worldNoise.getHeight(0, 12);
   const pz = Number.isFinite(Number(pData.z)) ? Number(pData.z) : 12;
   const protY = Number.isFinite(Number(pData.rotY)) ? Number(pData.rotY) : 0;
+  const wasNewPlayer = !remotePlayers.has(clientId);
+  const previousPartyId = remotePlayers.get(clientId)?.partyId || null;
   let rp = remotePlayers.get(clientId);
   if (!rp) {
     const char3D = new ArticulatedCharacter3D(pData.config);
@@ -3015,7 +3632,12 @@ function upsertRemotePlayerState(clientId, pData) {
       isJumping: !!pData.isJumping,
       configHash: JSON.stringify(pData.config),
       lastAttackPulse: pData.attackPulse || 0,
+      lastSupportHealPulse: pData.supportHealPulse || 0,
+      lastTankShieldPulse: pData.tankShieldPulse || 0,
       lastChatSeq: pData.chatSeq || 0,
+      lastPartyInvitePulse: 0,
+      lastPartyDisbandPulse: 0,
+      partyId: null,
       chatBubbleExpiresAt: 0,
       chatBubbleText: "",
       lastLocalSeen: performance.now()
@@ -3036,6 +3658,7 @@ function upsertRemotePlayerState(clientId, pData) {
     rp.animState = pData.animState || 'idle';
     rp.speedRatio = Number(pData.speedRatio) || 0;
     rp.isJumping = !!pData.isJumping;
+    rp.partyId = pData.partyId || null;
     if (pData.attackPulse && pData.attackPulse !== rp.lastAttackPulse) {
       rp.lastAttackPulse = pData.attackPulse;
       rp.char3D.triggerWeaponCombo(pData.comboStep || 1);
@@ -3043,12 +3666,59 @@ function upsertRemotePlayerState(clientId, pData) {
     if (pData.skillPulse && pData.skillPulse !== rp.lastSkillPulse) {
       rp.lastSkillPulse = pData.skillPulse;
       skillFX.spawnClassSkillFX(
-        pData.config.classId || 'swordsman',
+        getSkillClassId(pData.config),
         !!pData.skillIsUlt,
         rp.char3D.root.position,
         null,
         rp.targetRotY
       );
+    }
+  }
+  rp.partyId = pData.partyId || null;
+  const invitePulse = Number(pData.partyInvitePulse) || 0;
+  if (pData.partyInviteTo === myClientId && invitePulse > rp.lastPartyInvitePulse) {
+    rp.lastPartyInvitePulse = invitePulse;
+    const invitePartyId = pData.partyId || `${clientId}_${invitePulse}`;
+    if (Date.now() - invitePulse <= 20000 && (!myPartyId || myPartyId === invitePartyId)) {
+      pendingPartyInvite = { partyId: invitePartyId, displayName };
+      document.getElementById('party-invite-text').textContent = `${displayName} ชวนคุณเข้าร่วมปาร์ตี้`;
+      document.getElementById('party-invite-prompt').classList.remove('hidden');
+    }
+  }
+  const disbandPulse = Number(pData.partyDisbandPulse) || 0;
+  if (disbandPulse > rp.lastPartyDisbandPulse) {
+    rp.lastPartyDisbandPulse = disbandPulse;
+    if (myPartyId && pData.partyDisbandId === myPartyId) {
+      myPartyId = null;
+      addLog('👥 หัวหน้าทีมยุบปาร์ตี้แล้ว', 'text-indigo-200');
+      renderPartyPanel();
+      broadcastMyStateToRTDB();
+    }
+  }
+  if (wasNewPlayer || previousPartyId !== rp.partyId) renderPartyPanel();
+  if (pData.supportHealPulse && pData.supportHealPulse !== rp.lastSupportHealPulse) {
+    rp.lastSupportHealPulse = pData.supportHealPulse;
+    const radius = Number(pData.supportHealRadius) || 0;
+    if (gameState === 'world' && myPartyId && rp.partyId === myPartyId && radius > 0 &&
+        playerChar3D.root.position.distanceTo(rp.char3D.root.position) <= radius) {
+      const percent = Math.max(0, Number(pData.supportHealPercent) || 0);
+      const amount = percent > 0
+        ? Math.round(playerStats.maxHp * percent)
+        : Math.max(0, Number(pData.supportHealAmount) || 0);
+      playerStats.hp = Math.min(playerStats.maxHp, playerStats.hp + amount);
+      if (amount > 0) {
+        showFloatingDamage(playerChar3D.root.position, `+${amount} HP จากเพื่อน`, '#34d399');
+        updateHUD();
+      }
+    }
+  }
+  if (pData.tankShieldPulse && pData.tankShieldPulse !== rp.lastTankShieldPulse) {
+    rp.lastTankShieldPulse = pData.tankShieldPulse;
+    if (gameState === 'world' && myPartyId && rp.partyId === myPartyId &&
+        playerChar3D.root.position.distanceTo(rp.char3D.root.position) <= 8) {
+      classCombatState.tankShield = Math.max(classCombatState.tankShield, Number(pData.tankShieldAmount) || 0);
+      classCombatState.tankShieldTimer = 20;
+      addLog('🛡️ ได้รับโล่พลังงานจากแทงค์ใกล้ตัว', 'text-sky-300');
     }
   }
   if (pData.chatBubble && pData.chatSeq && pData.chatSeq !== rp.lastChatSeq) {
@@ -3072,6 +3742,7 @@ function removeRemotePlayer(clientId) {
   rp.labelObj.el.remove();
   remotePlayers.delete(clientId);
   updateOnlinePlayerCountUI();
+  renderPartyPanel();
 }
 function updateOnlinePlayerCountUI() {
   const countEl = document.getElementById('online-count');
@@ -3079,6 +3750,17 @@ function updateOnlinePlayerCountUI() {
     countEl.textContent = String(1 + remotePlayers.size);
   }
 }
+document.getElementById('btn-party-panel').addEventListener('click', () => {
+  const panel = document.getElementById('party-panel');
+  panel.classList.toggle('hidden');
+  if (!panel.classList.contains('hidden')) renderPartyPanel();
+});
+document.getElementById('btn-close-party-panel').addEventListener('click', () => {
+  document.getElementById('party-panel').classList.add('hidden');
+});
+document.getElementById('btn-leave-party').addEventListener('click', leaveParty);
+document.getElementById('btn-accept-party-invite').addEventListener('click', acceptPartyInvite);
+document.getElementById('btn-decline-party-invite').addEventListener('click', declinePartyInvite);
 function initMultiplayerSync() {
   const worldKey = sanitizeKey(worldNoise.seedStr);
   if (activeWorldKey === worldKey) return;
@@ -3170,6 +3852,12 @@ function appendChatEntryIfNew(c) {
 let lastAttackPulse = 0;
 let lastSkillPulse = 0;
 let lastSkillIsUlt = false;
+let lastSupportHealPulse = 0;
+let lastSupportHealAmount = 0;
+let lastSupportHealRadius = 0;
+let lastSupportHealPercent = 0;
+let lastTankShieldPulse = 0;
+let lastTankShieldAmount = 0;
 let myChatSeq = 0;
 function broadcastMyStateToRTDB() {
   if (gameState !== 'world') return;
@@ -3190,6 +3878,17 @@ function broadcastMyStateToRTDB() {
     attackPulse: lastAttackPulse,
     skillPulse: lastSkillPulse,
     skillIsUlt: lastSkillIsUlt,
+    supportHealPulse: lastSupportHealPulse,
+    supportHealAmount: lastSupportHealAmount,
+    supportHealRadius: lastSupportHealRadius,
+    supportHealPercent: lastSupportHealPercent,
+    tankShieldPulse: lastTankShieldPulse,
+    tankShieldAmount: lastTankShieldAmount,
+    partyId: myPartyId,
+    partyInviteTo,
+    partyInvitePulse,
+    partyDisbandId,
+    partyDisbandPulse,
     level: playerStats.level,
     config: currentConfig,
     chatBubble: mySpeechBubbleText,
@@ -3272,11 +3971,49 @@ const physicsLootDrops = [];
 let gameState = 'auth';
 let worldBuilt = false;
 let targetMonster = null;
+let targetSupportPlayerId = null;
 let moveTargetPos = null;
 let skillCooldowns = { skill1: 0, ult: 0 };
+const classCombatState = {
+  fighterStacks: 0,
+  fighterComboSets: 0,
+  fighterSkill: null,
+  fighterUltimate: null,
+  swordSpirit: 0,
+  swordUltimate: null,
+  mageElement: 0,
+  mageField: null,
+  supportField: 0,
+  supportFieldTick: 0,
+  tankShield: 0,
+  tankShieldTimer: 0
+};
+const mageElements = [
+  { name: 'ไฟ', icon: '🔥', color: 0xf97316 },
+  { name: 'น้ำ', icon: '💧', color: 0x38bdf8 },
+  { name: 'ลม', icon: '🌪️', color: 0x4ade80 },
+  { name: 'ดิน', icon: '🪨', color: 0xa16207 },
+  { name: 'ไม้', icon: '🌿', color: 0x22c55e },
+  { name: 'ไฟฟ้า', icon: '⚡', color: 0xeab308 },
+  { name: 'น้ำแข็ง', icon: '❄️', color: 0x67e8f9 }
+];
+function getSkillClassId(config = currentConfig) {
+  if (config.classId !== 'classless') return config.classId;
+  const weaponType = WEAPONS[config.weaponId]?.type;
+  return {
+    sword: 'swordsman',
+    gloves: 'fighter',
+    staff: 'mage',
+    bow: 'archer',
+    shield: 'tank',
+    tome: 'support'
+  }[weaponType] || 'swordsman';
+}
 let currentComboStep = 1;
 let comboResetTimer = 0;
 let comboInputQueued = false;
+let archerChargeStartedAt = 0;
+let pendingArrowCharge = 1;
 let activeHarvestNode = null;
 let harvestProgress = 0;
 function spawnWaterSplashRing(pos, colorHex = 0xe0f2fe, maxRadius = 2.2) {
@@ -3321,14 +4058,15 @@ function recalculateStats() {
   playerStats.maxMp = cls.stats.mp + lvBonus * 14;
   playerStats.atk = cls.stats.atk + w.atk + lvBonus * 5 + (playerStats.foodBuffAtk || 0);
   playerStats.matk = cls.stats.matk + w.matk + lvBonus * 5 + (playerStats.foodBuffAtk || 0);
-  playerStats.def = cls.stats.def + lvBonus * 3 + (currentConfig.classId === 'swordsman' ? 4 : 0);
-  playerStats.spd = cls.stats.spd;
+  playerStats.def = cls.stats.def + lvBonus * 3;
+  playerStats.spd = cls.stats.spd * (currentConfig.classId === 'archer' ? 1.25 : 1);
   playerStats.hp = Math.min(playerStats.hp, playerStats.maxHp);
   playerStats.mp = Math.min(playerStats.mp, playerStats.maxMp);
   updateHUD();
 }
 function updateHUD() {
   const cls = CLASSES[currentConfig.classId];
+  const skillClass = CLASSES[getSkillClassId()];
   const w = WEAPONS[currentConfig.weaponId] || WEAPONS.sword_iron;
   document.getElementById('hud-level').textContent = `Lv.${playerStats.level}`;
   document.getElementById('hud-name').textContent = currentConfig.name;
@@ -3347,12 +4085,27 @@ function updateHUD() {
   document.getElementById('hud-matk').textContent = playerStats.matk;
   document.getElementById('hud-def').textContent = playerStats.def;
   document.getElementById('hud-spd').textContent = playerStats.spd;
-  document.getElementById('skill1-icon').textContent = cls.skills.active.icon;
-  document.getElementById('skill1-name').textContent = cls.skills.active.name;
-  document.getElementById('passive-icon').textContent = cls.skills.passive.icon;
-  document.getElementById('passive-name').textContent = cls.skills.passive.name;
-  document.getElementById('ult-icon').textContent = cls.skills.ult.icon;
-  document.getElementById('ult-name').textContent = cls.skills.ult.name;
+  const comboLength = w.type === 'gloves' ? 4 : 3;
+  document.getElementById('combo-badge').textContent = `COMBO x${playerChar3D.comboStep || 1}/${comboLength}`;
+  document.getElementById('combo-icon').textContent = w.type === 'gloves' ? '🥊' : w.type === 'bow' ? '🏹' : '⚔️';
+  const mageElement = mageElements[classCombatState.mageElement % mageElements.length];
+  document.getElementById('skill1-icon').textContent =
+    getSkillClassId() === 'mage' ? mageElement.icon : skillClass.skills.active.icon;
+  document.getElementById('skill1-name').textContent =
+    getSkillClassId() === 'mage' ? `ธาตุ${mageElement.name}` : skillClass.skills.active.name;
+  document.getElementById('passive-icon').textContent =
+    currentConfig.classId === 'classless' ? '🚫' : cls.skills.passive.icon;
+  const passiveProgress = currentConfig.classId === 'fighter'
+    ? ` ${classCombatState.fighterStacks} ขั้น`
+    : currentConfig.classId === 'swordsman'
+      ? ` ${classCombatState.swordSpirit} ขั้น`
+      : currentConfig.classId === 'tank' && classCombatState.tankShieldTimer > 0
+        ? ` ${Math.ceil(classCombatState.tankShieldTimer)} วิ`
+        : '';
+  document.getElementById('passive-name').textContent =
+    currentConfig.classId === 'classless' ? 'ไม่มีพาสซีฟอาชีพ' : `${cls.skills.passive.name}${passiveProgress}`;
+  document.getElementById('ult-icon').textContent = skillClass.skills.ult.icon;
+  document.getElementById('ult-name').textContent = skillClass.skills.ult.name;
   document.getElementById('count-hp-pot').textContent = playerStats.hpPots;
   document.getElementById('count-mp-pot').textContent = playerStats.mpPots;
   document.getElementById('quest-progress').textContent = `ความคืบหน้า: ${playerStats.questKills} / ${playerStats.questTarget}`;
@@ -3379,13 +4132,347 @@ function updateTargetUI() {
     return;
   }
   box.classList.remove('hidden');
-  document.getElementById('target-name').textContent = targetMonster.name;
+  box.classList.toggle('is-boss', !!targetMonster.isBoss);
+  document.getElementById('target-name').textContent = `${targetMonster.isBoss ? '👑 ' : ''}${targetMonster.name}`;
   document.getElementById('target-lv').textContent = `Lv.${targetMonster.lv}`;
+  const bossBadge = document.getElementById('target-boss-label');
+  if (bossBadge) bossBadge.classList.toggle('hidden', !targetMonster.isBoss);
+  const tierNames = { easy: 'เขตเริ่มต้น', intermediate: 'เขตระดับกลาง', high: 'เขตระดับสูง', danger: 'เขตอันตราย' };
+  const zoneLabel = document.getElementById('target-zone');
+  if (zoneLabel) zoneLabel.textContent = targetMonster.isBoss ? 'บอสประจำเขตอันตราย' : (tierNames[targetMonster.tier] || 'เขตสำรวจ');
   document.getElementById('target-hp-bar').style.width = `${Math.max(0, (targetMonster.hp / targetMonster.maxHp) * 100)}%`;
   document.getElementById('target-hp-text').textContent = `${Math.ceil(targetMonster.hp)} / ${targetMonster.maxHp}`;
-  document.getElementById('combo-badge').textContent = `COMBO x${playerChar3D.comboStep || 1}`;
+  const comboLength = WEAPONS[currentConfig.weaponId]?.type === 'gloves' ? 4 : 3;
+  document.getElementById('combo-badge').textContent = `COMBO x${playerChar3D.comboStep || 1}/${comboLength}`;
+}
+function applyCombatDamage(mon, amount, { knockback = 0, color = '#fbbf24', prefix = '', soundHit = true } = {}) {
+  if (!mon || mon.hp <= 0) return 0;
+  let damage = Math.max(1, Math.round(amount));
+  if (getSkillClassId() === 'mage') {
+    const element = mageElements[classCombatState.mageElement % mageElements.length];
+    const previousElement = mon.elementalMark;
+    if (previousElement && previousElement !== element.name) {
+      damage = Math.round(damage * 1.5);
+      const reactionName = previousElement === 'น้ำ' && element.name === 'ไฟ'
+        ? 'ระเหย'
+        : previousElement === 'ไฟฟ้า' && element.name === 'น้ำแข็ง'
+          ? 'แตกสลาย'
+          : 'ปฏิกิริยาธาตุ';
+      showFloatingDamage(mon.mesh.position, `${reactionName} ${previousElement}+${element.name}!`, '#f0abfc');
+    }
+    mon.elementalMark = element.name;
+    mon.elementalMarkTimer = 8;
+    if (element.name === 'ไฟ') {
+      mon.elementalDotTimer = 3;
+      mon.elementalDotTick = 0;
+      mon.elementalDotDamage = Math.max(1, playerStats.matk * 0.15);
+    } else if (element.name === 'น้ำ') {
+      mon.slowTimer = 2;
+    } else if (element.name === 'ดิน') {
+      mon.stunTimer = Math.max(mon.stunTimer || 0, 0.45);
+    } else if (element.name === 'น้ำแข็ง') {
+      mon.stunTimer = Math.max(mon.stunTimer || 0, 0.7);
+    } else if (element.name === 'ไฟฟ้า') {
+      mon.stunTimer = Math.max(mon.stunTimer || 0, 0.3);
+    } else if (element.name === 'ไม้') {
+      playerStats.hp = Math.min(playerStats.maxHp, playerStats.hp + playerStats.matk * 0.04);
+    }
+  }
+  mon.hp = Math.max(0, mon.hp - damage);
+  targetMonster = mon;
+  if (knockback > 0) {
+    const pPos = playerChar3D.root.position;
+    const ang = Math.atan2(mon.mesh.position.x - pPos.x, mon.mesh.position.z - pPos.z);
+    mon.vx = Math.sin(ang) * knockback;
+    mon.vz = Math.cos(ang) * knockback;
+    mon.vy = knockback > 9 ? 5.8 : 2.8;
+  }
+  if (soundHit) sound.sfxHit();
+  showFloatingDamage(mon.mesh.position, `${prefix}${damage}`, color);
+  if (currentConfig.classId === 'support') {
+    const healing = damage * 0.1;
+    playerStats.hp = Math.min(playerStats.maxHp, playerStats.hp + healing);
+    if (healing >= 1) showFloatingDamage(playerChar3D.root.position, `+${Math.round(healing)} HP`, '#34d399');
+  }
+  if (currentConfig.classId === 'fighter' && classCombatState.fighterSkill) {
+    classCombatState.fighterStacks = Math.min(99, classCombatState.fighterStacks + 1);
+  }
+  if (mon.hp <= 0) handleMonsterKill(mon);
+  updateHUD();
+  updateTargetUI();
+  return damage;
+}
+function getForwardCombatTargets(range, halfArc = 1.15) {
+  const origin = playerChar3D.root.position;
+  const angle = playerPhysics.targetRotY;
+  const direction = new THREE.Vector3(Math.sin(angle), 0, Math.cos(angle));
+  return monsters.filter(mon => {
+    if (mon.hp <= 0) return false;
+    const offset = mon.mesh.position.clone().sub(origin);
+    if (offset.length() > range) return false;
+    return direction.dot(offset.normalize()) >= Math.cos(halfArc);
+  });
+}
+function spawnCombatBurst(position, color, radius) {
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.65, 0.9, 36),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.copy(position);
+  ring.position.y += 0.08;
+  worldGroup.add(ring);
+  vfxRings.push({ mesh: ring, age: 0, maxRadius: radius / 0.9 });
+}
+function createFighterCometTrail(position) {
+  const geometry = new THREE.BufferGeometry();
+  const capacity = 48;
+  const positions = new Float32Array(capacity * 3);
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
+  geometry.setDrawRange(0, 0);
+  const outer = new THREE.Line(geometry, new THREE.LineBasicMaterial({
+    color: 0xf97316, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false
+  }));
+  const inner = new THREE.Line(geometry, new THREE.LineBasicMaterial({
+    color: 0xfff7cc, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false
+  }));
+  outer.frustumCulled = false;
+  inner.frustumCulled = false;
+  worldGroup.add(outer, inner);
+  return {
+    geometry, outer, inner, points: [{ position: position.clone(), age: 0 }],
+    lastPosition: position.clone(), positions, capacity
+  };
+}
+function updateFighterCometTrail(trail, position, dt) {
+  if (!trail) return;
+  for (const point of trail.points) point.age += dt;
+  if (trail.lastPosition.distanceTo(position) >= 0.24) {
+    trail.points.push({ position: position.clone(), age: 0 });
+    trail.lastPosition.copy(position);
+  }
+  while (trail.points.length > trail.capacity || (trail.points.length > 1 && trail.points[0].age > 0.48)) {
+    trail.points.shift();
+  }
+  const attribute = trail.geometry.attributes.position;
+  trail.points.forEach((point, index) => {
+    attribute.setXYZ(index, point.position.x, point.position.y + 0.08, point.position.z);
+  });
+  attribute.needsUpdate = true;
+  trail.geometry.setDrawRange(0, trail.points.length);
+  const opacity = trail.points.length < 2 ? 0 : Math.max(0, 1 - trail.points[0].age / 0.48);
+  trail.outer.material.opacity = opacity * 0.9;
+  trail.inner.material.opacity = opacity;
+  trail.outer.visible = opacity > 0;
+  trail.inner.visible = opacity > 0;
+}
+function disposeFighterCometTrail(trail) {
+  if (!trail) return;
+  worldGroup.remove(trail.outer, trail.inner);
+  trail.geometry.dispose();
+  trail.outer.material.dispose();
+  trail.inner.material.dispose();
+}
+function updateClassCombatState(dt) {
+  const pPos = playerChar3D.root.position;
+  monsters.forEach(mon => {
+    if (mon.elementalMarkTimer > 0) {
+      mon.elementalMarkTimer = Math.max(0, mon.elementalMarkTimer - dt);
+      if (mon.elementalMarkTimer === 0) mon.elementalMark = null;
+    }
+    if (mon.slowTimer > 0) mon.slowTimer = Math.max(0, mon.slowTimer - dt);
+    if (mon.elementalDotTimer > 0) {
+      mon.elementalDotTimer = Math.max(0, mon.elementalDotTimer - dt);
+      mon.elementalDotTick = (mon.elementalDotTick || 0) + dt;
+      if (mon.elementalDotTick >= 1 && mon.hp > 0) {
+        mon.elementalDotTick -= 1;
+        const damage = Math.max(1, Math.round(mon.elementalDotDamage || 1));
+        mon.hp = Math.max(0, mon.hp - damage);
+        showFloatingDamage(mon.mesh.position, `🔥 -${damage}`, '#fb923c');
+        if (mon.hp <= 0) handleMonsterKill(mon);
+      }
+    }
+  });
+  const fighterSkill = classCombatState.fighterSkill;
+  if (fighterSkill) {
+    fighterSkill.elapsed += dt;
+    while (fighterSkill.hits < 10 && fighterSkill.elapsed >= fighterSkill.nextHit) {
+      fighterSkill.nextHit += 0.2;
+      fighterSkill.hits++;
+      playerChar3D.triggerWeaponCombo(((fighterSkill.hits - 1) % 4) + 1);
+      sound.sfxPunch(fighterSkill.hits);
+      getForwardCombatTargets(5.5, 1.35).forEach(mon => {
+        applyCombatDamage(mon, playerStats.atk * 0.72, { knockback: 1.5, color: '#fb923c', prefix: '🥊 -', soundHit: false });
+      });
+    }
+    if (fighterSkill.hits >= 10) {
+      classCombatState.fighterSkill = null;
+      addLog(`🥊 หมัดพายุครบ 10 ครั้ง! สะสม ${classCombatState.fighterStacks} ขั้นนักสู้`, 'text-orange-300');
+    }
+  }
+
+  const fighterUltimate = classCombatState.fighterUltimate;
+  if (fighterUltimate) {
+    fighterUltimate.elapsed += dt;
+    playerPhysics.vx = 0;
+    playerPhysics.vz = 0;
+    const center = fighterUltimate.center;
+
+    if (fighterUltimate.phase === 'approach') {
+      fighterUltimate.phaseTimer += dt;
+      const progress = Math.min(1, fighterUltimate.phaseTimer / fighterUltimate.approachDuration);
+      const firstPoint = fighterUltimate.vertices[fighterUltimate.path[0]];
+      pPos.x = THREE.MathUtils.lerp(fighterUltimate.approachFrom.x, firstPoint.x, progress);
+      pPos.z = THREE.MathUtils.lerp(fighterUltimate.approachFrom.z, firstPoint.z, progress);
+      playerPhysics.targetRotY = Math.atan2(firstPoint.x - pPos.x, firstPoint.z - pPos.z);
+      if (progress >= 1) {
+        fighterUltimate.phase = 'star';
+        fighterUltimate.phaseTimer = 0;
+      }
+    } else if (fighterUltimate.phase === 'star') {
+      fighterUltimate.phaseTimer += dt;
+      const segmentDuration = 0.18;
+      const progress = Math.min(1, fighterUltimate.phaseTimer / segmentDuration);
+      const from = fighterUltimate.vertices[fighterUltimate.path[fighterUltimate.segment]];
+      const to = fighterUltimate.vertices[fighterUltimate.path[fighterUltimate.segment + 1]];
+      pPos.x = THREE.MathUtils.lerp(from.x, to.x, progress);
+      pPos.z = THREE.MathUtils.lerp(from.z, to.z, progress);
+      playerPhysics.targetRotY = Math.atan2(to.x - from.x, to.z - from.z);
+
+      if (!fighterUltimate.hitApplied && progress >= 0.5) {
+        fighterUltimate.hitApplied = true;
+        playerChar3D.triggerWeaponCombo((fighterUltimate.segment % 4) + 1);
+        sound.sfxPunchUltimate(false);
+        monsters.forEach(mon => {
+          if (mon.hp > 0 && Math.hypot(mon.mesh.position.x - center.x, mon.mesh.position.z - center.z) <= 2.2) {
+            applyCombatDamage(mon, playerStats.atk * 0.55, {
+              knockback: 0,
+              color: '#fb7185',
+              prefix: '🌟 -',
+              soundHit: false
+            });
+          }
+        });
+        spawnCombatBurst(center, 0xfb7185, 3.2);
+      }
+
+      if (progress >= 1) {
+        fighterUltimate.segment++;
+        fighterUltimate.phaseTimer = 0;
+        fighterUltimate.hitApplied = false;
+        if (fighterUltimate.segment >= 5) {
+          fighterUltimate.phase = 'leap';
+          fighterUltimate.phaseTimer = 0;
+          playerPhysics.vy = 12;
+          playerPhysics.isGrounded = false;
+          sound.sfxJump();
+        }
+      }
+    } else if (fighterUltimate.phase === 'leap') {
+      fighterUltimate.phaseTimer += dt;
+      pPos.x = center.x;
+      pPos.z = center.z;
+      if (fighterUltimate.phaseTimer >= 0.38) {
+        fighterUltimate.phase = 'slam';
+        fighterUltimate.phaseTimer = 0;
+        playerPhysics.vy = -20;
+      }
+    } else if (fighterUltimate.phase === 'slam') {
+      fighterUltimate.phaseTimer += dt;
+      pPos.x = center.x;
+      pPos.z = center.z;
+      if (playerPhysics.isGrounded || fighterUltimate.phaseTimer >= 0.8) {
+        sound.sfxPunchUltimate(true);
+        spawnCombatBurst(center, 0xfbbf24, 9);
+        const ultimateMultiplier = 1 + fighterUltimate.stacks * 0.12;
+        monsters.forEach(mon => {
+          if (mon.hp > 0 && Math.hypot(mon.mesh.position.x - center.x, mon.mesh.position.z - center.z) <= 9) {
+            applyCombatDamage(mon, playerStats.atk * 2 * ultimateMultiplier, {
+              knockback: 14,
+              color: '#fbbf24',
+              prefix: '☄️ -',
+              soundHit: false
+            });
+          }
+        });
+        addLog(`🔥 อัลติเมทเสร็จสิ้น พลังจาก ${fighterUltimate.stacks} ขั้นนักสู้ถูกใช้แล้ว`, 'text-amber-300');
+        classCombatState.fighterStacks = 0;
+        disposeFighterCometTrail(fighterUltimate.trail);
+        classCombatState.fighterUltimate = null;
+        playerPhysics.jumpCount = 0;
+        playerPhysics.vy = 0;
+        updateHUD();
+      }
+    }
+    if (classCombatState.fighterUltimate) {
+      updateFighterCometTrail(fighterUltimate.trail, pPos, dt);
+    }
+  }
+
+  const swordUltimate = classCombatState.swordUltimate;
+  if (swordUltimate) {
+    swordUltimate.elapsed += dt;
+    const interval = 5 / swordUltimate.hits;
+    while (swordUltimate.completed < swordUltimate.hits && swordUltimate.elapsed >= swordUltimate.nextHit) {
+      swordUltimate.nextHit += interval;
+      swordUltimate.completed++;
+      playerChar3D.triggerWeaponCombo(((swordUltimate.completed - 1) % 3) + 1);
+      if (swordUltimate.completed === 1 || swordUltimate.completed % 3 === 0) sound.sfxSwordUltimate();
+      const targets = getForwardCombatTargets(15, Math.PI);
+      const target = targetMonster?.hp > 0 && pPos.distanceTo(targetMonster.mesh.position) <= 15
+        ? targetMonster
+        : targets[0];
+      if (target) {
+        playerPhysics.targetRotY = Math.atan2(target.mesh.position.x - pPos.x, target.mesh.position.z - pPos.z);
+        applyCombatDamage(target, playerStats.atk * 1.3, { knockback: 1.2, color: '#fca5a5', prefix: '⚔️ -', soundHit: false });
+      }
+    }
+    if (swordUltimate.completed >= swordUltimate.hits || swordUltimate.elapsed >= 5) {
+      classCombatState.swordUltimate = null;
+    }
+  }
+
+  if (classCombatState.tankShieldTimer > 0) {
+    classCombatState.tankShieldTimer = Math.max(0, classCombatState.tankShieldTimer - dt);
+    if (classCombatState.tankShieldTimer === 0) classCombatState.tankShield = 0;
+  }
+
+  if (classCombatState.supportField > 0) {
+    classCombatState.supportField = Math.max(0, classCombatState.supportField - dt);
+    classCombatState.supportFieldTick += dt;
+    if (classCombatState.supportFieldTick >= 1) {
+      classCombatState.supportFieldTick -= 1;
+      const amount = Math.round(playerStats.maxHp * 0.05);
+      playerStats.hp = Math.min(playerStats.maxHp, playerStats.hp + amount);
+      lastSupportHealPulse = Date.now();
+      lastSupportHealPercent = 0.05;
+      lastSupportHealAmount = 0;
+      lastSupportHealRadius = 8;
+      showFloatingDamage(pPos, `+${amount} HP`, '#34d399');
+      updateHUD();
+      broadcastMyStateToRTDB();
+    }
+    if (classCombatState.supportField === 0) classCombatState.supportFieldTick = 0;
+  }
+
+  const mageField = classCombatState.mageField;
+  if (mageField) {
+    mageField.elapsed -= dt;
+    mageField.tick += dt;
+    if (mageField.tick >= 1) {
+      mageField.tick -= 1;
+      spawnCombatBurst(pPos, mageField.element.color, 6.5);
+      monsters.forEach(mon => {
+        if (mon.hp > 0 && pPos.distanceTo(mon.mesh.position) <= 6.5) {
+          applyCombatDamage(mon, playerStats.matk * 0.3, { knockback: 0, color: `#${mageField.element.color.toString(16).padStart(6, '0')}`, prefix: `${mageField.element.icon} -`, soundHit: false });
+        }
+      });
+    }
+    if (mageField.elapsed <= 0) classCombatState.mageField = null;
+  }
 }
 function queueOrPerformComboAttack() {
+  if (isPlayerDead) return;
   if (playerChar3D.attackTimer > 0.08) {
     comboInputQueued = true;
     return;
@@ -3393,12 +4480,14 @@ function queueOrPerformComboAttack() {
   executeComboAttackStep();
 }
 function executeComboAttackStep() {
+  if (isPlayerDead) return;
   comboInputQueued = false;
   activeHarvestNode = null;
   document.getElementById('hud-gather-box').classList.add('hidden');
   const pPos = playerChar3D.root.position;
   const w = WEAPONS[currentConfig.weaponId] || WEAPONS.sword_iron;
   const isRanged = ['bow', 'staff', 'tome'].includes(w.type);
+  const comboLength = w.type === 'gloves' ? 4 : 3;
   const range = isRanged ? 11.5 : 4.2;
   const autoLockRange = isRanged ? 7.5 : 3.2; // ระยะล็อคเป้าอัตโนมัติเฉพาะมอนสเตอร์ที่อยู่ใกล้ตัวจริงๆ
 
@@ -3432,16 +4521,29 @@ function executeComboAttackStep() {
 
   const step = currentComboStep;
   playerChar3D.triggerWeaponCombo(step);
-  sound.sfxCombo(step, w.type);
+  if (w.type === 'gloves') sound.sfxPunch(step);
+  else if (currentConfig.classId === 'swordsman') sound.sfxSwordAttack(step);
+  else sound.sfxCombo(step, w.type);
   lastAttackPulse = Date.now();
   broadcastMyStateToRTDB();
-  document.getElementById('combo-step-label').textContent = `คอมโบ ${step}/3`;
+  document.getElementById('combo-step-label').textContent = `คอมโบ ${step}/${comboLength}`;
   comboResetTimer = 2.2;
-  currentComboStep = (currentComboStep % 3) + 1;
+  currentComboStep = (currentComboStep % comboLength) + 1;
+  if (step === comboLength) {
+    if (currentConfig.classId === 'fighter') {
+      classCombatState.fighterComboSets++;
+      if (classCombatState.fighterComboSets >= 2) {
+        classCombatState.fighterComboSets = 0;
+        skillCooldowns.skill1 = 0;
+        document.getElementById('cd-skill1').classList.add('hidden');
+        addLog('🔥 คอมโบครบ 2 ชุด! รีเซ็ตคูลดาวน์สกิลนักสู้', 'text-orange-300');
+      }
+    }
+  }
 
   const forwardAngle = playerPhysics.targetRotY;
   if (!isRanged) {
-    const stepImpulse = step === 3 ? 6.5 : 2.4; // ลดแรงพุ่งตัวเวลาฟันลมเล่นๆ
+    const stepImpulse = step === comboLength ? (w.type === 'gloves' ? 7.5 : 6.5) : 2.4;
     playerPhysics.vx += Math.sin(forwardAngle) * stepImpulse;
     playerPhysics.vz += Math.cos(forwardAngle) * stepImpulse;
   }
@@ -3471,74 +4573,267 @@ function executeComboAttackStep() {
   }
 
   const power = Math.max(playerStats.atk, playerStats.matk);
-  const comboMult = step === 1 ? 1.0 : step === 2 ? 1.35 : 1.95;
+  const chargedArrowMult = w.type === 'bow' ? pendingArrowCharge : 1;
+  pendingArrowCharge = 1;
+  const comboMult = (w.type === 'gloves'
+    ? (step === 3 ? 1.55 : step === 4 ? 2.1 : 1.0)
+    : (step === 1 ? 1.0 : step === 2 ? 1.35 : 1.95)) * chargedArrowMult;
   monsters.forEach(mon => {
     if (mon.hp <= 0) return;
     const dist = pPos.distanceTo(mon.mesh.position);
-    if ((mon === targetMonster && dist <= range) || (!isRanged && dist <= 3.8)) {
+    const attackAngle = Math.atan2(mon.mesh.position.x - pPos.x, mon.mesh.position.z - pPos.z);
+    const facingDiff = Math.abs(Math.atan2(
+      Math.sin(attackAngle - forwardAngle),
+      Math.cos(attackAngle - forwardAngle)
+    ));
+    const inForwardArc = dist <= range && facingDiff < (isRanged ? 0.35 : 1.35);
+    if ((mon === targetMonster && dist <= range) || (!isRanged && dist <= 3.8) || (isRanged && inForwardArc)) {
+      const crit = step === comboLength;
       const dmg = Math.round(power * comboMult * (0.92 + Math.random() * 0.2));
-      mon.hp -= dmg;
-      targetMonster = mon;
-      const ang = Math.atan2(mon.mesh.position.x - pPos.x, mon.mesh.position.z - pPos.z);
-      const kb = step === 3 ? 11.5 : 5.2;
-      mon.vx = Math.sin(ang) * kb;
-      mon.vz = Math.cos(ang) * kb;
-      mon.vy = step === 3 ? 6.2 : 3.0;
-      sound.sfxHit();
-      showFloatingDamage(
-        mon.mesh.position,
-        step === 3 ? `💥 CRIT -${dmg}!` : `-${dmg}`,
-        step === 3 ? '#f43f5e' : '#fbbf24'
-      );
-      if (mon.hp <= 0) handleMonsterKill(mon);
+      applyCombatDamage(mon, dmg, {
+        knockback: crit ? 11.5 : 5.2,
+        color: crit ? '#f43f5e' : '#fbbf24',
+        prefix: crit ? '💥 CRIT -' : '-'
+      });
+      if (currentConfig.classId === 'swordsman') {
+        classCombatState.swordSpirit = Math.min(30, classCombatState.swordSpirit + (step === 3 ? 3 : 1));
+      }
     }
   });
+  if (currentConfig.classId === 'fighter') {
+    document.getElementById('combo-step-label').textContent += ` | นักสู้ ${classCombatState.fighterStacks}`;
+  }
 
   // ตัดคำสั่ง moveTargetPos = targetMonster.mesh.position.clone() ออก
   // เพื่อไม่ให้ตัวละครวิ่งเข้าไปหามอนสเตอร์เองตอนกดตีเล่นๆ
   updateTargetUI();
 }
 function triggerClassSkill(isUlt = false) {
-  const cls = CLASSES[currentConfig.classId];
+  if (isPlayerDead) return;
+  const skillClassId = getSkillClassId();
+  const cls = CLASSES[skillClassId];
   const sk = isUlt ? cls.skills.ult : cls.skills.active;
   const cdKey = isUlt ? 'ult' : 'skill1';
   if (skillCooldowns[cdKey] > 0) return;
+  let fighterUltimateTarget = null;
+  if (skillClassId === 'fighter' && isUlt) {
+    if (targetMonster?.hp > 0 && playerChar3D.root.position.distanceTo(targetMonster.mesh.position) <= 18) {
+      fighterUltimateTarget = targetMonster;
+    } else {
+      fighterUltimateTarget = monsters.reduce((closest, mon) => {
+        if (mon.hp <= 0) return closest;
+        const distance = playerChar3D.root.position.distanceTo(mon.mesh.position);
+        if (distance > 18 || (closest && distance >= closest.distance)) return closest;
+        return { mon, distance };
+      }, null)?.mon || null;
+    }
+    if (!fighterUltimateTarget) {
+      addLog('⚠️ อัลติเมทนักสู้ต้องมีเป้าหมายที่ยังมีชีวิตอยู่ในระยะ 18 เมตร', 'text-rose-300');
+      return;
+    }
+  }
   if (playerStats.mp < sk.mp) {
     addLog("⚠️ Mana ไม่เพียงพอสำหรับการใช้สกิล!", "text-rose-400");
     return;
   }
   playerStats.mp -= sk.mp;
   skillCooldowns[cdKey] = sk.cd;
-  isUlt ? sound.sfxUltimate() : sound.sfxMagic();
   const pPos = playerChar3D.root.position;
+  const targetPos = fighterUltimateTarget?.mesh.position ||
+    ((targetMonster && targetMonster.hp > 0) ? targetMonster.mesh.position : null);
+  if (skillClassId === 'fighter') {
+    if (isUlt) {
+      targetMonster = fighterUltimateTarget;
+      moveTargetPos = null;
+      playerPhysics.dashTimer = 0;
+      playerPhysics.vx = 0;
+      playerPhysics.vz = 0;
+      const center = new THREE.Vector3(targetMonster.mesh.position.x, pPos.y, targetMonster.mesh.position.z);
+      const startAngle = Math.atan2(pPos.x - center.x, pPos.z - center.z);
+      const vertices = Array.from({ length: 5 }, (_, index) => {
+        const angle = startAngle + index * Math.PI * 2 / 5;
+        return new THREE.Vector3(
+          center.x + Math.sin(angle) * 5,
+          pPos.y,
+          center.z + Math.cos(angle) * 5
+        );
+      });
+      classCombatState.fighterUltimate = {
+        elapsed: 0,
+        phase: 'approach',
+        phaseTimer: 0,
+        approachFrom: pPos.clone(),
+        approachDuration: Math.max(0.08, Math.min(0.24, pPos.distanceTo(vertices[0]) / 34)),
+        center,
+        target: targetMonster,
+        vertices,
+        path: [0, 2, 4, 1, 3, 0],
+        segment: 0,
+        hitApplied: false,
+        stacks: classCombatState.fighterStacks,
+        trail: createFighterCometTrail(pPos),
+      };
+      targetMonster.stunTimer = Math.max(targetMonster.stunTimer || 0, 2.2);
+      playerChar3D.animState = 'attack';
+      sound.sfxUltimate();
+    } else {
+      classCombatState.fighterSkill = { elapsed: 0, nextHit: 0.2, hits: 0 };
+      sound.sfxPunchSkill();
+    }
+    const effectCenter = isUlt && classCombatState.fighterUltimate
+      ? classCombatState.fighterUltimate.center
+      : pPos;
+    skillFX.spawnClassSkillFX(skillClassId, isUlt, pPos, isUlt ? effectCenter : targetPos, playerPhysics.targetRotY);
+    spawnCombatBurst(effectCenter, isUlt ? 0xfb7185 : 0xf97316, isUlt ? 5.5 : 3.4);
+    lastSkillPulse = Date.now();
+    lastSkillIsUlt = isUlt;
+    updateHUD();
+    broadcastMyStateToRTDB();
+    return;
+  }
+
+  if (skillClassId === 'mage' && !isUlt) {
+    classCombatState.mageElement = (classCombatState.mageElement + 1) % mageElements.length;
+    const element = mageElements[classCombatState.mageElement];
+    addLog(`🔮 เปลี่ยนธาตุโจมตีเป็น${element.name}`, 'text-sky-300');
+    sound.sfxMagic();
+    spawnCombatBurst(pPos, element.color, 3.2);
+    lastSkillPulse = Date.now();
+    lastSkillIsUlt = false;
+    updateHUD();
+    broadcastMyStateToRTDB();
+    return;
+  }
+
+  if (skillClassId === 'support' && isUlt) {
+    classCombatState.supportField = 10;
+    classCombatState.supportFieldTick = 0;
+    sound.sfxUltimate();
+    lastSkillPulse = Date.now();
+    lastSkillIsUlt = true;
+    const dome = new THREE.Mesh(
+      new THREE.CylinderGeometry(8, 8, 0.08, 48),
+      new THREE.MeshBasicMaterial({ color: 0x34d399, transparent: true, opacity: 0.38, side: THREE.DoubleSide })
+    );
+    dome.position.copy(playerChar3D.root.position);
+    worldGroup.add(dome);
+    skillFX.activeFX.push({ type: 'holy_dome', mesh: dome, age: 0, maxAge: 10 });
+    addLog('🌿 เขตรักษาทำงาน 10 วินาที', 'text-emerald-300');
+    updateHUD();
+    broadcastMyStateToRTDB();
+    return;
+  }
+
+  if (skillClassId === 'tank' && isUlt) {
+    classCombatState.tankShield = playerStats.maxHp;
+    classCombatState.tankShieldTimer = 20;
+    lastTankShieldPulse = Date.now();
+    lastTankShieldAmount = playerStats.maxHp;
+    sound.sfxUltimate();
+    lastSkillPulse = Date.now();
+    lastSkillIsUlt = true;
+    const shield = new THREE.Mesh(
+      new THREE.SphereGeometry(1.45, 24, 16),
+      new THREE.MeshBasicMaterial({ color: 0x60a5fa, transparent: true, opacity: 0.3, wireframe: true })
+    );
+    shield.position.copy(playerChar3D.root.position).add(new THREE.Vector3(0, 1, 0));
+    worldGroup.add(shield);
+    skillFX.activeFX.push({ type: 'holy_dome', mesh: shield, age: 0, maxAge: 20 });
+    addLog(`🛡️ โล่พลังงาน ${classCombatState.tankShield} HP คงอยู่ 20 วินาที`, 'text-sky-300');
+    updateHUD();
+    broadcastMyStateToRTDB();
+    return;
+  }
+
+  if (skillClassId === 'swordsman' && isUlt) {
+    classCombatState.swordUltimate = {
+      elapsed: 0,
+      nextHit: 0,
+      hits: Math.max(1, classCombatState.swordSpirit),
+      completed: 0
+    };
+    sound.sfxUltimate();
+    skillFX.spawnClassSkillFX(skillClassId, true, pPos, targetPos, playerPhysics.targetRotY);
+    spawnDistinctClassSkillVFX(worldGroup, skillClassId, true, pPos, playerPhysics.targetRotY);
+    lastSkillPulse = Date.now();
+    lastSkillIsUlt = true;
+    updateHUD();
+    broadcastMyStateToRTDB();
+    return;
+  }
+
+  playerChar3D.triggerWeaponCombo(isUlt ? 3 : 2);
+  if (skillClassId === 'swordsman' && !isUlt) sound.sfxSwordWave();
+  else isUlt ? sound.sfxUltimate() : sound.sfxMagic();
   if (targetMonster && targetMonster.hp > 0 && cameraMode !== 'fps' && cameraMode !== 'tps') {
     const dx = targetMonster.mesh.position.x - pPos.x;
     const dz = targetMonster.mesh.position.z - pPos.z;
     if (Math.hypot(dx, dz) > 0.05) playerPhysics.targetRotY = Math.atan2(dx, dz);
   }
-  const targetPos = (targetMonster && targetMonster.hp > 0) ? targetMonster.mesh.position : null;
-  skillFX.spawnClassSkillFX(currentConfig.classId, isUlt, pPos, targetPos, playerPhysics.targetRotY);
+  skillFX.spawnClassSkillFX(skillClassId, isUlt, pPos, targetPos, playerPhysics.targetRotY);
+  spawnDistinctClassSkillVFX(worldGroup, skillClassId, isUlt, pPos, playerPhysics.targetRotY);
   lastSkillPulse = Date.now();
   lastSkillIsUlt = isUlt;
   broadcastMyStateToRTDB();
+  if (skillClassId === 'support' && !isUlt) {
+    const healAmount = Math.round(playerStats.matk * 0.5);
+    let nearestAlly = remotePlayers.get(targetSupportPlayerId) || null;
+    let nearestDistance = 8;
+    if (!myPartyId || nearestAlly?.partyId !== myPartyId) nearestAlly = null;
+    if (nearestAlly && pPos.distanceTo(nearestAlly.char3D.root.position) > nearestDistance) nearestAlly = null;
+    remotePlayers.forEach(remote => {
+      if (!myPartyId || remote.partyId !== myPartyId) return;
+      const distance = pPos.distanceTo(remote.char3D.root.position);
+      if (!nearestAlly && distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestAlly = remote;
+      }
+    });
+    if (nearestAlly) {
+      lastSupportHealPulse = Date.now();
+      lastSupportHealAmount = healAmount;
+      lastSupportHealRadius = 2;
+      lastSupportHealPercent = 0;
+      addLog(`💚 รักษาเพื่อน ${nearestAlly.displayName} ${healAmount} HP`, 'text-emerald-300');
+    } else {
+      playerStats.hp = Math.min(playerStats.maxHp, playerStats.hp + healAmount);
+      lastSupportHealPercent = 0;
+      lastSupportHealRadius = 0;
+      lastSupportHealAmount = 0;
+      showFloatingDamage(pPos, `+${healAmount} HP`, '#34d399');
+      addLog(`💚 รักษาตัวเอง ${healAmount} HP`, 'text-emerald-300');
+    }
+    updateHUD();
+    broadcastMyStateToRTDB();
+    return;
+  }
+  if (skillClassId === 'mage' && isUlt) {
+    classCombatState.mageField = { elapsed: 10, tick: 0, element: mageElements[classCombatState.mageElement] };
+  }
   if (sk.heal) {
     playerStats.hp = Math.min(playerStats.maxHp, playerStats.hp + sk.heal);
     showFloatingDamage(pPos, `+${sk.heal} HP`, '#34d399');
   }
   const power = Math.max(playerStats.atk, playerStats.matk);
-  const hitRadius = isUlt ? 11.5 : 8.5;
+  const hitRadius = skillClassId === 'tank' ? 6 : isUlt ? 11.5 : 8.5;
   monsters.forEach(mon => {
     if (mon.hp <= 0) return;
     if (pPos.distanceTo(mon.mesh.position) <= hitRadius) {
+      if (skillClassId === 'swordsman' && !isUlt) {
+        const forward = new THREE.Vector3(Math.sin(playerPhysics.targetRotY), 0, Math.cos(playerPhysics.targetRotY));
+        const toMonster = mon.mesh.position.clone().sub(pPos);
+        if (toMonster.length() > 15 || forward.dot(toMonster.normalize()) < 0.72) return;
+      }
       const dmg = Math.round(power * sk.mult * (0.95 + Math.random() * 0.2));
-      mon.hp -= dmg;
-      targetMonster = mon;
-      const ang = Math.atan2(mon.mesh.position.x - pPos.x, mon.mesh.position.z - pPos.z);
-      mon.vx = Math.sin(ang) * (isUlt ? 14 : 8);
-      mon.vz = Math.cos(ang) * (isUlt ? 14 : 8);
-      mon.vy = isUlt ? 7.5 : 4.5;
-      showFloatingDamage(mon.mesh.position, `✨ -${dmg}`, '#38bdf8');
-      if (mon.hp <= 0) handleMonsterKill(mon);
+      applyCombatDamage(mon, dmg, {
+        knockback: isUlt ? 14 : 8,
+        color: `#${sk.color.toString(16).padStart(6, '0')}`,
+        prefix: '✨ -'
+      });
+      if (skillClassId === 'swordsman' && !isUlt) {
+        classCombatState.swordSpirit = Math.min(30, classCombatState.swordSpirit + 1);
+      }
+      if (skillClassId === 'tank' && !isUlt) mon.stunTimer = 2;
     }
   });
   updateHUD();
@@ -3694,7 +4989,23 @@ function isAnyModalOpen() {
 
 // ฟังก์ชันกด E ปฏิสัมพันธ์ครอบจักรวาล (ใช้ได้ทั้งโหมด 2.5D, POV 1, POV 3 และ Bird-Eye)
 function interactWithNearestObject(isShiftPressed = false) {
+  if (isPlayerDead) return;
   const pPos = playerChar3D.root.position;
+
+  // เช็คการเปิดหีบสมบัติในถ้ำเขาวงกตด้วยปุ่ม E
+  for (let i = 0; i < caveChests.length; i++) {
+    const ch = caveChests[i];
+    if (!ch.opened && Math.hypot(pPos.x - ch.wx, pPos.z - ch.wz) < 3.5) {
+      ch.opened = true;
+      ch.mesh.scale.y = 0.5;
+      sound.sfxLevelUp();
+      gainExpAndGold(350, 500, 'mithril_ore');
+      showFloatingDamage(pPos, '💎 สมบัติถ้ำเขาวงกต +500 G / +350 EXP!', '#fbbf24');
+      addLog('🏆 เปิดหีบสมบัติลับในถ้ำเขาวงกตสำเร็จ! ได้รับ <b>+500 Gold, +350 EXP และแร่มิธริล!</b>', 'text-amber-300 font-bold');
+      return;
+    }
+  }
+
   const maxInteractDist = 4.5;
 
   // 1. เช็คประตูที่อยู่ใกล้ที่สุด (และอยู่ชั้นเดียวกัน)
@@ -3729,7 +5040,11 @@ function interactWithNearestObject(isShiftPressed = false) {
       renderChefRestaurantModal();
       document.getElementById('modal-chef').classList.remove('hidden');
     } else if (role === 'tavern') {
-      renderInnModal();
+      currentActiveInnTownId = nearestNPC.userData.townId ?? TOWNS.reduce((closest, town) =>
+        Math.hypot(nearestNPC.position.x - town.x, nearestNPC.position.z - town.z) <
+        Math.hypot(nearestNPC.position.x - closest.x, nearestNPC.position.z - closest.z) ? town : closest
+      , TOWNS[0]).id;
+      renderInnModal(null, currentActiveInnTownId);
       document.getElementById('modal-inn').classList.remove('hidden');
     } else if (role === 'citizen') {
       addLog(`💬 <b>${nearestNPC.userData.npcName}</b>: "สวัสดีท่านผู้กล้า! ขอให้เป็นการเดินทางที่ปลอดภัยนะ!"`, "text-sky-300");
@@ -3748,8 +5063,8 @@ function interactWithNearestObject(isShiftPressed = false) {
   });
   if (nearestCab) {
     releaseMouseForUI();
-    const keysArr = playerStats.roomKeys || [];
-    if (nearestCab.roomId && !keysArr.includes(nearestCab.roomId)) {
+    expireRoomRentals();
+    if (nearestCab.roomId && !hasActiveRoomRental(nearestCab.roomId)) {
       addLog(`🔒 ต้องมี <b>🔑 กุญแจห้องพัก ${nearestCab.roomId}</b> ก่อนจึงจะเปิดตู้เก็บของได้!`, "text-amber-300");
       renderInnModal(nearestCab.roomId);
       document.getElementById('modal-inn').classList.remove('hidden');
@@ -3789,12 +5104,14 @@ function interactWithNearestObject(isShiftPressed = false) {
   let nearestCar = null, minCarDist = 4.2;
   animatedCarriages.forEach(car => {
     const dist = Math.hypot(pPos.x - car.group.position.x, pPos.z - car.group.position.z);
-    if (dist < minCarDist) { minCarDist = dist; nearestCar = car; }
+    if (dist < minCarDist) {
+      minCarDist = dist;
+      nearestCar = car;
+    }
   });
   if (nearestCar) {
     sound.sfxClick();
-    ridingCarriage = (ridingCarriage === nearestCar) ? null : nearestCar;
-    addLog(ridingCarriage ? `🐎 ขึ้นนั่งรถม้าชมเมืองแล้ว! (กด WASD เพื่อลง)` : `🐎 ลงจากรถม้าเรียบร้อยแล้ว`, "text-emerald-300");
+    toggleCarriageRide(nearestCar);
     return;
   }
 
@@ -3854,19 +5171,15 @@ async function savePlayerToRTDB() {
 
 // ฟังก์ชันเข้าสู่โลกเกมโดยตรง (พร้อมตรวจสอบจุดเซฟเตียงโรงเตี๋ยม)
 async function startWorldSession() {
+  await beginWorldLoading();
   sculptTooltip.classList.add('hidden');
   rebuildPreviewCharacter();
   recalculateStats();
 
-  document.getElementById('screen-auth').classList.add('hidden');
-  document.getElementById('screen-creator').classList.add('hidden');
-  document.getElementById('screen-hud').classList.remove('hidden');
-  creatorPedestal.visible = false;
-  worldGroup.visible = true;
-  gameState = 'world';
-
   if (!worldBuilt) {
-    buildAllGrandCities();
+    setLoadingProgress(18, 'กำลังสร้างมหานครและเส้นทางรถม้า...');
+    worldGroup.visible = true;
+    await buildAllGrandCities();
     worldBuilt = true;
   }
 
@@ -3877,8 +5190,12 @@ async function startWorldSession() {
   const sp = playerStats.savedSpawn;
   const lastPos = playerStats.lastLogoutPos;
   const stillInInn = sp && (!lastPos || isPositionInsideInn(lastPos));
+  let spawnX;
+  let spawnZ;
 
   if (stillInInn && typeof sp.x === 'number' && typeof sp.z === 'number') {
+    spawnX = sp.x;
+    spawnZ = sp.z;
     playerChar3D.root.position.set(sp.x, sp.y, sp.z);
     playerPhysics.targetRotY = sp.rotY || 0;
     playerChar3D.root.rotation.y = sp.rotY || 0;
@@ -3899,14 +5216,15 @@ async function startWorldSession() {
   } else {
     playerStats.savedSpawn = null;
     const nearestTown = getNearestTownToPosition(lastPos);
-    const spawnX = nearestTown.x;
-    const spawnZ = nearestTown.z + 12;
+    spawnX = nearestTown.x;
+    spawnZ = nearestTown.z + 12;
     const spawnY = worldNoise.getHeight(spawnX, spawnZ);
     playerChar3D.root.position.set(spawnX, spawnY, spawnZ);
     playerChar3D.animState = 'idle';
     addLog(`🏰 เกิดที่มหานครที่ใกล้ที่สุด: <b>${nearestTown.name}</b>`, "text-emerald-300 font-bold");
   }
 
+  await finishWorldLoading(spawnX, spawnZ);
   playerChar3D.setFirstPersonVisibility(cameraMode === 'fps');
   updateMyNametagHTML();
   initMultiplayerSync();
@@ -4115,19 +5433,50 @@ function renderChefRestaurantModal() {
 }
 // ==================== ระบบโรงเตี๋ยม 2 ชั้น: เช่าห้องพักชั่วคราว รับกุญแจห้อง เปิดตู้เก็บของ และนอนเตียง ====================
 const INN_ROOMS_CATALOG = [
-  { roomId: '201', name: 'ห้องพัก 201 (Standard Single Room)', price: 40, desc: 'ห้องพักชั้น 2 ฝั่งตะวันตก พร้อมเตียงนุ่ม ตู้เก็บของ โต๊ะเก้าอี้ริมหน้าต่าง และกุญแจห้อง 201' },
-  { roomId: '202', name: 'ห้องพัก 202 (Deluxe Center Room)',   price: 60, desc: 'ห้องพักชั้น 2 โซนกลางวิวระเบียงเมือง พร้อมเตียงใหญ่ ตู้เก็บของ โต๊ะเขียนหนังสือ และกุญแจห้อง 202' },
-  { roomId: '203', name: 'ห้องพัก 203 (Royal Suite VIP)',      price: 90, desc: 'ห้องสวีทชั้น 2 ติดบันไดทางขึ้น พร้อมเตียงหรู ตู้เก็บของส่วนตัว เก้าอี้รับรอง และกุญแจห้อง 203' }
+  { baseRoomId: '201', name: 'ห้องพัก 201 (Standard Single Room)', price: 40, desc: 'ห้องพักชั้น 2 ฝั่งตะวันตก พร้อมเตียงนุ่ม ตู้เก็บของ และตู้เสื้อผ้า' },
+  { baseRoomId: '202', name: 'ห้องพัก 202 (Deluxe Center Room)', price: 60, desc: 'ห้องพักชั้น 2 โซนกลางวิวระเบียงเมือง พร้อมเตียงใหญ่และตู้เสื้อผ้า' },
+  { baseRoomId: '203', name: 'ห้องพัก 203 (Royal Suite VIP)', price: 90, desc: 'ห้องสวีทชั้น 2 พร้อมเตียงหรู ตู้เก็บของ และตู้เสื้อผ้าส่วนตัว' }
 ];
-function renderInnModal(highlightRoomId = null) {
+function getRoomRental(roomId) {
+  return playerStats.roomRentals?.[roomId] || null;
+}
+function hasActiveRoomRental(roomId) {
+  const rental = getRoomRental(roomId);
+  return !!rental && Number(rental.expiresAtGameDay) > getCurrentGameDay()
+    && (playerStats.roomKeys || []).includes(roomId);
+}
+function expireRoomRentals() {
+  if (!playerStats.roomRentals) playerStats.roomRentals = {};
+  const gameDay = getCurrentGameDay();
+  for (const [roomId, rental] of Object.entries(playerStats.roomRentals)) {
+    if (Number(rental.expiresAtGameDay) > gameDay) continue;
+    playerStats.roomKeys = (playerStats.roomKeys || []).filter(id => id !== roomId);
+    const door = interactiveDoors.find(entry => entry.roomId === roomId);
+    if (door) {
+      door.isLocked = true;
+      door.isOpen = false;
+      door.targetAngle = 0;
+      door.collider.disabled = false;
+      updateRoomDoorLabel(door);
+    }
+  }
+}
+function renderInnModal(highlightRoomId = null, townId = currentActiveInnTownId) {
+  const roomTownId = highlightRoomId && String(highlightRoomId).includes('-')
+    ? Number(String(highlightRoomId).split('-')[0])
+    : Number(townId);
+  currentActiveInnTownId = Number.isFinite(roomTownId) ? roomTownId : 0;
+  expireRoomRentals();
   const grid = document.getElementById('inn-rooms-grid');
   if (!grid) return;
   grid.innerHTML = '';
   if (!Array.isArray(playerStats.roomKeys)) playerStats.roomKeys = [];
 
-  INN_ROOMS_CATALOG.forEach(rm => {
-    const hasKey = playerStats.roomKeys.includes(rm.roomId);
-    const isHighlighted = highlightRoomId === rm.roomId;
+  INN_ROOMS_CATALOG.forEach(room => {
+    const rm = { ...room, roomId: `${currentActiveInnTownId}-${room.baseRoomId}` };
+    const rental = getRoomRental(rm.roomId);
+    const hasKey = hasActiveRoomRental(rm.roomId);
+    const isHighlighted = highlightRoomId === rm.roomId || highlightRoomId === rm.baseRoomId;
     const roomDoor = interactiveDoors.find(d => d.roomId === rm.roomId);
     const isOpen = roomDoor ? roomDoor.isOpen : false;
     const isLocked = roomDoor ? !!roomDoor.isLocked : true;
@@ -4138,7 +5487,7 @@ function renderInnModal(highlightRoomId = null) {
       <div>
         <div class="flex items-center gap-2 flex-wrap">
           <span class="font-extrabold text-amber-300 text-sm">🔑 ${rm.name}</span>
-          ${hasKey ? '<span class="px-2 py-0.5 rounded-full bg-emerald-500/25 border border-emerald-400 text-[10px] text-emerald-200 font-bold">มีกุญแจห้องนี้แล้ว</span>' : ''}
+          ${hasKey ? `<span class="px-2 py-0.5 rounded-full bg-emerald-500/25 border border-emerald-400 text-[10px] text-emerald-200 font-bold">เช่าถึงวันในเกม ${rental.expiresAtGameDay}</span>` : ''}
           ${hasKey && roomDoor ? `<span class="px-2 py-0.5 rounded-full bg-slate-800 border border-slate-600 text-[10px] ${isLocked ? 'text-rose-300' : 'text-sky-300'}">${isLocked ? '🔒 ล็อคอยู่' : '🔓 ปลดล็อค'} \vert{} ${isOpen ? 'ประตูเปิด' : 'ประตูปิด'}</span>` : ''}
         </div>
         <div class="text-xs text-slate-300 mt-0.5">${rm.desc}</div>
@@ -4152,54 +5501,47 @@ function renderInnModal(highlightRoomId = null) {
             ${isLocked ? '🔓 ปลดล็อคห้อง' : '🔒 ล็อคห้อง'}
           </button>
         ` : ''}
-        <button class="rent-room-btn px-3 py-1.5 rounded-lg text-xs font-bold ${
-          hasKey
-            ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
-            : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
-        }">
-          ${hasKey ? '⚡ วาร์ปหน้าห้อง ' + rm.roomId : `เช่าห้องรับกุญแจ (${rm.price} G)`}
-        </button>
+        <select class="rent-days bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-white">
+          <option value="1">1 วัน (${rm.price} G)</option>
+          <option value="7">1 อาทิตย์ (${rm.price * 7} G)</option>
+          <option value="30">1 เดือน (${rm.price * 30} G)</option>
+        </select>
+        <button class="rent-room-btn px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950">${hasKey ? 'ต่ออายุ' : 'เช่าห้อง'}</button>
       </div>
     `;
 
     if (hasKey && roomDoor) {
       card.querySelector('.toggle-open-btn').onclick = () => {
         toggleDoorState(roomDoor, null, false);
-        renderInnModal(rm.roomId);
+        renderInnModal(rm.roomId, currentActiveInnTownId);
       };
       card.querySelector('.toggle-lock-btn').onclick = () => {
         toggleDoorState(roomDoor, null, true);
-        renderInnModal(rm.roomId);
+        renderInnModal(rm.roomId, currentActiveInnTownId);
       };
     }
 
     card.querySelector('.rent-room-btn').onclick = () => {
-      if (!hasKey) {
-        if (playerStats.gold < rm.price) {
-          addLog(`❌ เงิน Gold ไม่พอเช่า ${rm.name} (ต้องการ ${rm.price} G)`, "text-rose-400");
-          return;
-        }
-        playerStats.gold -= rm.price;
-        playerStats.roomKeys.push(rm.roomId);
-        sound.sfxLevelUp();
-        addLog(`🔑 ได้รับ <b>กุญแจ${rm.name}</b> แล้ว! คลิกที่ประตูเพื่อเปิด/ปิด หรือกด Shift+คลิกที่ประตูเพื่อล็อค/ปลดล็อคได้ตลอดเวลา!`, "text-amber-300 font-bold");
-        if (roomDoor) {
-          roomDoor.isLocked = false;
-          updateRoomDoorLabel(roomDoor);
-        }
-        updateHUD();
-        savePlayerToRTDB();
-        renderInnModal(rm.roomId);
-      } else if (roomDoor) {
-        sound.sfxMagic();
-        activeSittingSeat = null;
-        activeSleepingBed = null;
-        playerChar3D.root.position.set(roomDoor.wx, roomDoor.wy + 0.1, roomDoor.wz - 1.4);
-        playerPhysics.vx = 0; playerPhysics.vy = 0; playerPhysics.vz = 0;
-        playerChar3D.animState = 'idle';
-        document.getElementById('modal-inn').classList.add('hidden');
-        addLog(`🪜 มาที่หน้า <b>${rm.name}</b> บนชั้น 2 แล้ว!`, "text-emerald-300");
+      const days = Number(card.querySelector('.rent-days').value);
+      const price = rm.price * days;
+      if (!Number.isInteger(days) || ![1, 7, 30].includes(days)) return;
+      if (playerStats.gold < price) {
+        addLog(`❌ เงิน Gold ไม่พอเช่า ${rm.name} ${days} วัน (ต้องการ ${price} G)`, "text-rose-400");
+        return;
       }
+      playerStats.gold -= price;
+      const startDay = Math.max(getCurrentGameDay(), Number(rental?.expiresAtGameDay) || 0);
+      playerStats.roomRentals[rm.roomId] = { expiresAtGameDay: startDay + days };
+      if (!playerStats.roomKeys.includes(rm.roomId)) playerStats.roomKeys.push(rm.roomId);
+      sound.sfxLevelUp();
+      addLog(`🔑 เช่าห้อง <b>${rm.name}</b> เพิ่ม ${days === 1 ? '1 วัน' : days === 7 ? '1 อาทิตย์' : '1 เดือน'}ของเวลาในเกม เรียบร้อย!`, "text-amber-300 font-bold");
+      if (roomDoor) {
+        roomDoor.isLocked = false;
+        updateRoomDoorLabel(roomDoor);
+      }
+      updateHUD();
+      savePlayerToRTDB();
+      renderInnModal(rm.roomId, currentActiveInnTownId);
     };
     grid.appendChild(card);
   });
@@ -4213,6 +5555,20 @@ function renderRoomStorageModal(roomId = '201') {
   if (!playerStats.roomStorage) {
     playerStats.roomStorage = { gold: 0, mithril_ore: 0, moon_herb: 0, ancient_wood: 0, golden_wheat: 0, monster_core: 0 };
   }
+  const wardrobeRow = document.createElement('div');
+  wardrobeRow.className = 'bg-purple-950/50 border border-purple-400/40 rounded-xl p-3 flex items-center justify-between gap-3';
+  wardrobeRow.innerHTML = `
+    <div>
+      <div class="font-bold text-purple-200 text-xs">👗 ตู้เสื้อผ้า</div>
+      <div class="text-[11px] text-slate-300">เปลี่ยนหรือถอดแฟชั่นที่ซื้อไว้ โดยไม่ต้องพกไว้ในกระเป๋า</div>
+    </div>
+    <button class="open-room-wardrobe px-3 py-1.5 rounded-lg bg-purple-500 hover:bg-purple-400 text-white text-xs font-bold">เปิดตู้เสื้อผ้า</button>
+  `;
+  wardrobeRow.querySelector('.open-room-wardrobe').onclick = () => {
+    document.getElementById('modal-storage').classList.add('hidden');
+    renderFashionShopModal(true);
+  };
+  listEl.appendChild(wardrobeRow);
   // แถวฝาก/ถอน Gold
   const goldRow = document.createElement('div');
   goldRow.className = "bg-slate-900/95 border border-amber-400/40 rounded-xl p-3 flex items-center justify-between";
@@ -4292,8 +5648,8 @@ function updateRoomDoorLabel(doorObj) {
 function toggleDoorState(doorObj, forceState = null, toggleLockMode = false) {
   if (!doorObj) return;
   if (doorObj.roomId) {
-    const keysArr = playerStats.roomKeys || [];
-    const hasKey = keysArr.includes(doorObj.roomId);
+    expireRoomRentals();
+    const hasKey = hasActiveRoomRental(doorObj.roomId);
     if (!hasKey && forceState !== true) {
       sound.sfxClick();
       addLog(`🔒 <b>${doorObj.title}</b> ล็อกอยู่! เฉพาะผู้ถือ <b>🔑 กุญแจห้อง ${doorObj.roomId}</b> เท่านั้นที่ควบคุมประตูนี้ได้`, "text-amber-300 font-bold");
@@ -4333,12 +5689,15 @@ function toggleDoorState(doorObj, forceState = null, toggleLockMode = false) {
 function sitOnChairSeat(seatObj) {
   if (!seatObj) return;
   ridingCarriage = null;
+  carriageDestinationPanel.classList.add('hidden');
+  openCarriageDestinationButton.classList.add('hidden');
   activeSleepingBed = null;
   activeBedTarget = null;
   moveTargetPos = null;
   activeSittingSeat = seatObj;
   playerPhysics.vx = 0; playerPhysics.vy = 0; playerPhysics.vz = 0;
   playerChar3D.root.position.set(seatObj.wx, seatObj.wy, seatObj.wz);
+  playerChar3D.sitPelvisY = seatObj.sitPelvisY / (playerChar3D.root.scale.y || 1);
   playerPhysics.targetRotY = seatObj.rotY;
   playerChar3D.root.rotation.y = seatObj.rotY;
   playerChar3D.animState = 'sit';
@@ -4352,8 +5711,8 @@ function sitOnChairSeat(seatObj) {
 }
 function restOnInnBed(bedObj) {
   if (!bedObj) return;
-  const keysArr = playerStats.roomKeys || [];
-  if (bedObj.roomId && !keysArr.includes(bedObj.roomId)) {
+  expireRoomRentals();
+  if (bedObj.roomId && !hasActiveRoomRental(bedObj.roomId)) {
     addLog(`🔑 ต้องมี <b>กุญแจห้องพัก ${bedObj.roomId}</b> ก่อนจึงจะเข้าพักผ่อนบนเตียงนี้ได้!`, "text-amber-300");
     renderInnModal(bedObj.roomId);
     document.getElementById('modal-inn').classList.remove('hidden');
@@ -4361,6 +5720,8 @@ function restOnInnBed(bedObj) {
     return;
   }
   ridingCarriage = null;
+  carriageDestinationPanel.classList.add('hidden');
+  openCarriageDestinationButton.classList.add('hidden');
   activeSittingSeat = null;
   activeSeatTarget = null;
   moveTargetPos = null;
@@ -4405,6 +5766,8 @@ document.getElementById('btn-start-game').onclick = async () => {
   sound.sfxLevelUp();
   currentConfig.name = document.getElementById('char-name-input').value.trim() || currentUsername;
   currentConfig.rpTitle = document.getElementById('char-title-input').value.trim() || "นักผจญภัยพเนจร";
+  playerStats.equippedFashion = null;
+  ensureFashionState(playerStats, currentConfig);
   playerStats.hp = playerStats.maxHp;
   playerStats.mp = playerStats.maxMp;
   playerStats.stamina = playerStats.maxStamina;
@@ -4462,21 +5825,6 @@ if (btnCloseStorage) {
     document.getElementById('modal-storage')?.classList.add('hidden');
   };
 }
-const btnWarpInn = document.getElementById('btn-warp-inn');
-if (btnWarpInn) {
-  btnWarpInn.onclick = () => {
-    sound.sfxMagic();
-    activeSittingSeat = null;
-    activeSleepingBed = null;
-    const wy = worldNoise.getHeight(-36, 9);
-    playerChar3D.root.position.set(-36, wy + 0.3, 9);
-    playerPhysics.vx = 0; playerPhysics.vy = 0; playerPhysics.vz = 0;
-    playerPhysics.targetRotY = 0;
-    playerChar3D.root.rotation.y = 0;
-    playerChar3D.animState = 'idle';
-    addLog("🏨 วาร์ปมาที่หน้า <b>โรงเตี๋ยมนักเดินทาง 2 ชั้น</b> เรียบร้อย! คลิกที่ประตูเพื่อเดินเข้าโถงชั้น 1 หรือเดินขึ้นบันไดไปชั้น 2 ได้เลย!", "text-amber-300 font-bold");
-  };
-}
 document.getElementById('btn-claim-quest').onclick = () => {
   if (playerStats.questKills < playerStats.questTarget) return;
   sound.sfxLevelUp();
@@ -4490,32 +5838,12 @@ document.getElementById('btn-claim-quest').onclick = () => {
 };
 document.getElementById('btn-start-game').onclick = async () => {
   sound.sfxLevelUp();
-  sculptTooltip.classList.add('hidden');
   currentConfig.name = document.getElementById('char-name-input').value.trim() || currentUsername;
   currentConfig.rpTitle = document.getElementById('char-title-input').value.trim() || "นักผจญภัยพเนจร";
-  rebuildPreviewCharacter();
-  recalculateStats();
   playerStats.hp = playerStats.maxHp;
   playerStats.mp = playerStats.maxMp;
   playerStats.stamina = playerStats.maxStamina;
-  document.getElementById('screen-creator').classList.add('hidden');
-  document.getElementById('screen-hud').classList.remove('hidden');
-  creatorPedestal.visible = false;
-  worldGroup.visible = true;
-  gameState = 'world';
-  if (!worldBuilt) {
-    buildAllGrandCities();
-    worldBuilt = true;
-  }
-  const startY = worldNoise.getHeight(0, 12);
-  playerChar3D.root.position.set(0, startY, 12);
-  playerPhysics.vx = 0; playerPhysics.vy = 0; playerPhysics.vz = 0;
-  playerChar3D.animState = 'idle';
-  playerChar3D.setFirstPersonVisibility(cameraMode === 'fps');
-  updateMyNametagHTML();
-  initMultiplayerSync();
-  await savePlayerToRTDB();
-  broadcastMyStateToRTDB();
+  await startWorldSession();
   addLog(`🌟 ยินดีต้อนรับ <b>${currentConfig.name} 《${currentConfig.rpTitle}》</b> เข้าสู่มหานครเอเธลการ์ด!`, "text-amber-300");
 };
 document.getElementById('btn-open-customize').onclick = () => {
@@ -4532,20 +5860,6 @@ document.getElementById('btn-open-customize').onclick = () => {
   document.getElementById('screen-hud').classList.add('hidden');
   document.getElementById('screen-creator').classList.remove('hidden');
 };
-document.querySelectorAll('.town-warp-btn').forEach(btn => {
-  btn.onclick = () => {
-    const town = TOWNS[Number(btn.dataset.town)];
-    if (!town) return;
-    sound.sfxMagic();
-    const ty = worldNoise.getHeight(town.x, town.z + 12);
-    playerChar3D.root.position.set(town.x, ty + 1.2, town.z + 12);
-    playerPhysics.vx = 0; playerPhysics.vy = 2; playerPhysics.vz = 0;
-    moveTargetPos = null;
-    spawnWaterSplashRing(playerChar3D.root.position, town.themeColor, 3.0);
-    broadcastMyStateToRTDB();
-    addLog(`⚡ วาร์ปมายัง <b>${town.name}</b> เรียบร้อย!`, "text-emerald-300");
-  };
-});
 // ============================================================================
 // 12. KEYBOARD & WORLD CLICK CONTROLS
 // ============================================================================
@@ -4569,14 +5883,51 @@ function resolveGameKey(e) {
   const raw = (e.key || '').toLowerCase();
   return THAI_KEY_MAP[raw] || raw;
 }
+function tryPlayerDash() {
+  if (gameState !== 'world' || isPlayerDead || ridingCarriage || carriageBoarding) return false;
+  if (playerPhysics.dashCooldown > 0 || playerStats.stamina < 18) return false;
+
+  let inputX = (keys['d'] || keys['arrowright'] ? 1 : 0) - (keys['a'] || keys['arrowleft'] ? 1 : 0);
+  let inputZ = (keys['s'] || keys['arrowdown'] ? 1 : 0) - (keys['w'] || keys['arrowup'] ? 1 : 0);
+  if (inputX || inputZ) {
+    const angle = Math.atan2(inputX, inputZ) + cameraYawAngle;
+    playerPhysics.dashDirectionX = Math.sin(angle);
+    playerPhysics.dashDirectionZ = Math.cos(angle);
+    playerPhysics.targetRotY = angle;
+  } else {
+    playerPhysics.dashDirectionX = Math.sin(playerPhysics.targetRotY);
+    playerPhysics.dashDirectionZ = Math.cos(playerPhysics.targetRotY);
+  }
+  playerPhysics.vx = playerPhysics.dashDirectionX * 34;
+  playerPhysics.vz = playerPhysics.dashDirectionZ * 34;
+  playerPhysics.dashTimer = 0.24;
+  playerPhysics.dashInvulnerability = 0.24;
+  playerPhysics.dashCooldown = 1.2;
+  playerStats.stamina -= 18;
+  playerChar3D.animState = 'jump';
+  sound.sfxDash();
+  return true;
+}
 window.addEventListener('keydown', (e) => {
   if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+  if (carriageDestinationPanel.contains(document.activeElement)) return;
+  if (isPlayerDead) {
+    e.preventDefault();
+    return;
+  }
   const k = resolveGameKey(e);
   keys[k] = true;
   if (gameState !== 'world') return;
+  if (k === ' ' && e.shiftKey) {
+    e.preventDefault();
+    if (!fishMinigameState.active && !grillMinigameState.active) tryPlayerDash();
+    return;
+  }
   if (['w', 'a', 's', 'd', ' '].includes(k)) {
     if (ridingCarriage) {
       ridingCarriage = null;
+      carriageDestinationPanel.classList.add('hidden');
+      openCarriageDestinationButton.classList.add('hidden');
       addLog("🐎 ลงจากรถม้าเรียบร้อยแล้ว", "text-amber-300");
     }
     if (activeSittingSeat) {
@@ -4595,7 +5946,11 @@ window.addEventListener('keydown', (e) => {
       }
     }
   }
-  if (k === 'f') queueOrPerformComboAttack();
+  if (k === 'f') {
+    if (WEAPONS[currentConfig.weaponId]?.type === 'bow') {
+      if (!e.repeat) archerChargeStartedAt = performance.now();
+    } else queueOrPerformComboAttack();
+  }
   if (k === '1') triggerClassSkill(false);
   if (k === '2') triggerClassSkill(true);
   if (k === '3') document.getElementById('slot-hp-pot').click();
@@ -4607,7 +5962,8 @@ window.addEventListener('keydown', (e) => {
   }
   if (k === 'r') togglePlayerWeaponSheathe();
   if (k === 'v') cycleCameraMode();
-  if (k === ' ' && (playerPhysics.jumpCount < 2 || playerPhysics.isInWater)) {
+  if (k === ' ' && currentConfig.classId === 'mage') e.preventDefault();
+  if (k === ' ' && currentConfig.classId !== 'mage' && (playerPhysics.jumpCount < 2 || playerPhysics.isInWater)) {
     playerPhysics.vy = playerPhysics.isInWater ? 7.5 : (playerPhysics.jumpCount === 0 ? 10.8 : 9.4);
     playerPhysics.isGrounded = false;
     playerPhysics.jumpCount++;
@@ -4617,6 +5973,12 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => {
   const k = resolveGameKey(e);
   keys[k] = false;
+  if (k === 'f' && archerChargeStartedAt > 0 && WEAPONS[currentConfig.weaponId]?.type === 'bow') {
+    const chargeSeconds = Math.max(0, (performance.now() - archerChargeStartedAt) / 1000);
+    pendingArrowCharge = 1 + Math.min(2, chargeSeconds);
+    archerChargeStartedAt = 0;
+    queueOrPerformComboAttack();
+  }
 });
 window.addEventListener('wheel', (e) => {
   if (gameState === 'creator') {
@@ -4626,7 +5988,7 @@ window.addEventListener('wheel', (e) => {
   }
 });
 renderer.domElement.addEventListener('click', (e) => {
-  if (gameState !== 'world') return;
+  if (gameState !== 'world' || isPlayerDead) return;
   if (cameraMode === 'tps' || cameraMode === 'fps') return;
   const rect = renderer.domElement.getBoundingClientRect();
   mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -4641,6 +6003,22 @@ renderer.domElement.addEventListener('click', (e) => {
     if (obj && obj.userData.nodeRef) {
       sound.sfxClick();
       startGatheringNearestNode(obj.userData.nodeRef);
+      return;
+    }
+  }
+  const remoteEntries = Array.from(remotePlayers.values());
+  const remoteHits = raycaster.intersectObjects(remoteEntries.map(remote => remote.char3D.root), true);
+  if (remoteHits.length > 0) {
+    const hitObject = remoteHits[0].object;
+    const selectedAlly = remoteEntries.find(remote => {
+      let parent = hitObject;
+      while (parent && parent !== remote.char3D.root) parent = parent.parent;
+      return parent === remote.char3D.root;
+    });
+    if (selectedAlly) {
+      targetSupportPlayerId = selectedAlly.clientId;
+      addLog(`💚 เลือก ${selectedAlly.displayName} เป็นเป้าหมายช่วยเหลือ`, 'text-emerald-300');
+      sound.sfxClick();
       return;
     }
   }
@@ -4665,14 +6043,7 @@ renderer.domElement.addEventListener('click', (e) => {
     while (obj && !obj.userData?.isCarriage) obj = obj.parent;
     if (obj && obj.userData?.carriageRef) {
       sound.sfxClick();
-      if (ridingCarriage === obj.userData.carriageRef) {
-        ridingCarriage = null;
-        addLog("🐎 ลงจากรถม้าเรียบร้อยแล้ว", "text-amber-300");
-      } else {
-        ridingCarriage = obj.userData.carriageRef;
-        moveTargetPos = null;
-        addLog(`🐎 ขึ้นนั่ง <b>${obj.userData.title}</b> ชมมหานคร! (กดปุ่มเดิน WASD หรือ Space เพื่อลงจากรถม้า)`, "text-emerald-300 font-bold");
-      }
+      toggleCarriageRide(obj.userData.carriageRef);
       return;
     }
   }
@@ -4735,8 +6106,8 @@ renderer.domElement.addEventListener('click', (e) => {
     while (obj && !obj.userData?.isCabinet) obj = obj.parent;
     if (obj && obj.userData?.cabinetRef) {
       const cab = obj.userData.cabinetRef;
-      const keysArr = playerStats.roomKeys || [];
-      if (cab.roomId && !keysArr.includes(cab.roomId)) {
+      expireRoomRentals();
+      if (cab.roomId && !hasActiveRoomRental(cab.roomId)) {
         addLog(`🔒 ต้องมี <b>🔑 กุญแจห้องพัก ${cab.roomId}</b> ก่อนจึงจะเปิดตู้เก็บของประจำห้องนี้ได้!`, "text-amber-300");
         renderInnModal(cab.roomId);
         document.getElementById('modal-inn').classList.remove('hidden');
@@ -4767,7 +6138,11 @@ renderer.domElement.addEventListener('click', (e) => {
         renderChefRestaurantModal();
         document.getElementById('modal-chef').classList.remove('hidden');
       } else if (role === 'tavern') {
-        renderInnModal();
+        currentActiveInnTownId = obj.userData.townId ?? TOWNS.reduce((closest, town) =>
+          Math.hypot(obj.position.x - town.x, obj.position.z - town.z) <
+          Math.hypot(obj.position.x - closest.x, obj.position.z - closest.z) ? town : closest
+        , TOWNS[0]).id;
+        renderInnModal(null, currentActiveInnTownId);
         document.getElementById('modal-inn').classList.remove('hidden');
         addLog(`🏨 <b>${obj.userData.npcName}</b>: "ยินดีต้อนรับสู่โรงเตี๋ยม 2 ชั้น! เลือกเช่าห้องพักชั่วคราวเพื่อรับกุญแจห้องขึ้นไปพักผ่อนบนชั้น 2 ได้เลย!"`, "text-amber-300");
       } else if (role === 'citizen') {
@@ -4800,46 +6175,119 @@ renderer.domElement.addEventListener('click', (e) => {
 const miniCanvas = document.getElementById('minimap-canvas');
 const miniCtx = miniCanvas.getContext('2d');
 function drawMinimap() {
-  miniCtx.fillStyle = '#090d16';
-  miniCtx.fillRect(0, 0, 215, 135);
+  const width = miniCanvas.width;
+  const height = miniCanvas.height;
   const px = playerChar3D.root.position.x;
   const pz = playerChar3D.root.position.z;
   const scale = 0.50;
-  const cx = 107, cy = 67;
-  miniCtx.strokeStyle = 'rgba(148, 163, 184, 0.14)';
-  miniCtx.beginPath();
-  for (let x = 0; x < 215; x += 24) { miniCtx.moveTo(x, 0); miniCtx.lineTo(x, 135); }
-  for (let y = 0; y < 135; y += 24) { miniCtx.moveTo(0, y); miniCtx.lineTo(215, y); }
-  miniCtx.stroke();
+  const cx = width / 2, cy = height / 2;
+  const mapX = (x) => cx + (x - px) * scale;
+  const mapZ = (z) => cy + (z - pz) * scale;
+  const tileSize = 7;
+  for (let y = 0; y < height; y += tileSize) {
+    for (let x = 0; x < width; x += tileSize) {
+      const wx = px + (x + tileSize / 2 - cx) / scale;
+      const wz = pz + (y + tileSize / 2 - cy) / scale;
+      const town = TOWNS.find(t => Math.hypot(wx - t.x, wz - t.z) <= t.radius);
+      let rgb = town
+        ? town.style === 'elven' ? [54, 105, 76]
+          : town.style === 'volcano' ? [117, 79, 57]
+            : town.style === 'frost' ? [88, 123, 139]
+              : [123, 107, 76]
+        : wx < -55 && wz < -55 ? [40, 83, 63]
+          : wx > 55 && wz < -45 ? [102, 69, 49]
+            : wx < -45 && wz > 55 ? [83, 117, 132]
+              : [83, 112, 68];
+      const h = worldNoise.getHeight(wx, wz);
+      const shade = Math.max(-16, Math.min(18, Math.round(h * 1.6)));
+      miniCtx.fillStyle = `rgb(${rgb.map(v => Math.max(0, Math.min(255, v + shade))).join(',')})`;
+      miniCtx.fillRect(x, y, tileSize, tileSize);
+    }
+  }
+  miniCtx.save();
+  miniCtx.strokeStyle = 'rgba(226, 232, 240, 0.5)';
+  miniCtx.lineWidth = 2.2;
   TOWNS.forEach(t => {
-    const tx = cx + (t.x - px) * scale;
-    const tz = cy + (t.z - pz) * scale;
-    miniCtx.fillStyle = '#fbbf24';
-    miniCtx.beginPath(); miniCtx.arc(tx, tz, 7, 0, Math.PI * 2); miniCtx.fill();
+    const tx = mapX(t.x);
+    const tz = mapZ(t.z);
+    if (tx < -t.radius * scale || tx > width + t.radius * scale || tz < -t.radius * scale || tz > height + t.radius * scale) return;
+    miniCtx.beginPath();
+    miniCtx.moveTo(mapX(t.x - 72), tz); miniCtx.lineTo(mapX(t.x + 72), tz);
+    miniCtx.moveTo(tx, mapZ(t.z - 72)); miniCtx.lineTo(tx, mapZ(t.z + 72));
+    miniCtx.stroke();
+    miniCtx.strokeStyle = 'rgba(226, 232, 240, 0.24)';
+    miniCtx.lineWidth = 1.2;
+    miniCtx.beginPath();
+    miniCtx.arc(tx, tz, 37 * scale, 0, Math.PI * 2);
+    miniCtx.stroke();
+    miniCtx.strokeStyle = 'rgba(226, 232, 240, 0.5)';
+    miniCtx.lineWidth = 2.2;
   });
+  miniCtx.restore();
+  TOWNS.forEach(t => {
+    const tx = mapX(t.x);
+    const tz = mapZ(t.z);
+    if (tx < -12 || tx > width + 12 || tz < -12 || tz > height + 12) return;
+    miniCtx.fillStyle = '#fbbf24';
+    miniCtx.strokeStyle = 'rgba(15, 23, 42, 0.95)';
+    miniCtx.lineWidth = 2;
+    miniCtx.beginPath(); miniCtx.arc(tx, tz, 7, 0, Math.PI * 2); miniCtx.fill();
+    miniCtx.stroke();
+    miniCtx.fillStyle = '#fff7cc';
+    miniCtx.font = 'bold 8px Kanit, sans-serif';
+    miniCtx.textAlign = 'center';
+    miniCtx.fillText(`${t.id + 1}`, tx, tz + 2.8);
+  });
+  enterableBuildings.forEach(building => {
+    const bx = mapX(building.wx);
+    const bz = mapZ(building.wz);
+    if (bx < 1 || bx > width - 1 || bz < 1 || bz > height - 1) return;
+    miniCtx.fillStyle = building.role === 'fashion_shop' ? '#e879f9'
+      : ['general_shop', 'fish_market', 'shop', 'food'].includes(building.role) ? '#38bdf8'
+        : '#fda4af';
+    miniCtx.fillRect(bx - 2, bz - 2, 4, 4);
+  });
+  if (ridingCarriage?.route?.length) {
+    miniCtx.strokeStyle = 'rgba(251, 191, 36, 0.9)';
+    miniCtx.lineWidth = 2;
+    miniCtx.setLineDash([4, 3]);
+    miniCtx.beginPath();
+    miniCtx.moveTo(mapX(ridingCarriage.group.position.x), mapZ(ridingCarriage.group.position.z));
+    for (let i = ridingCarriage.routeIndex; i < ridingCarriage.route.length; i++) {
+      miniCtx.lineTo(mapX(ridingCarriage.route[i].x), mapZ(ridingCarriage.route[i].z));
+    }
+    miniCtx.stroke();
+    miniCtx.setLineDash([]);
+    if (ridingCarriage.routeTarget) {
+      miniCtx.fillStyle = '#fbbf24';
+      miniCtx.beginPath();
+      miniCtx.arc(mapX(ridingCarriage.routeTarget.x), mapZ(ridingCarriage.routeTarget.z), 4, 0, Math.PI * 2);
+      miniCtx.fill();
+    }
+  }
   const radarMaxDist = gameSettings.minimapRadius || 110;
   farmingNodes.forEach(n => {
     if (!n.active) return;
-    const nx = cx + (n.x - px) * scale;
-    const nz = cy + (n.z - pz) * scale;
-    if (nx > 0 && nx < 215 && nz > 0 && nz < 135) {
+    const nx = mapX(n.x);
+    const nz = mapZ(n.z);
+    if (nx > 0 && nx < width && nz > 0 && nz < height) {
       miniCtx.fillStyle = '#38bdf8';
       miniCtx.fillRect(nx - 2, nz - 2, 4, 4);
     }
   });
   monsters.forEach(m => {
     if (m.hp <= 0 || !m.mesh.visible || Math.hypot(m.mesh.position.x - px, m.mesh.position.z - pz) > radarMaxDist) return;
-    const mx = cx + (m.mesh.position.x - px) * scale;
-    const mz = cy + (m.mesh.position.z - pz) * scale;
-    if (mx > 0 && mx < 215 && mz > 0 && mz < 135) {
-      miniCtx.fillStyle = '#f43f5e';
-      miniCtx.beginPath(); miniCtx.arc(mx, mz, 2.3, 0, Math.PI * 2); miniCtx.fill();
+    const mx = mapX(m.mesh.position.x);
+    const mz = mapZ(m.mesh.position.z);
+    if (mx > 0 && mx < width && mz > 0 && mz < height) {
+      miniCtx.fillStyle = m.isBoss ? '#fbbf24' : '#f43f5e';
+      miniCtx.beginPath(); miniCtx.arc(mx, mz, m.isBoss ? 4 : 2.3, 0, Math.PI * 2); miniCtx.fill();
     }
   });
   // วาดจุดผู้เล่นออนไลน์คนอื่นๆ ในห้องเดียวกันบน Minimap (จุดสีฟ้าสว่างพร้อมขอบขาว)
   remotePlayers.forEach(rp => {
-    const rx = THREE.MathUtils.clamp(cx + (rp.char3D.root.position.x - px) * scale, 6, 209);
-    const rz = THREE.MathUtils.clamp(cy + (rp.char3D.root.position.z - pz) * scale, 6, 129);
+    const rx = THREE.MathUtils.clamp(mapX(rp.char3D.root.position.x), 6, width - 6);
+    const rz = THREE.MathUtils.clamp(mapZ(rp.char3D.root.position.z), 6, height - 6);
     miniCtx.fillStyle = '#22d3ee';
     miniCtx.strokeStyle = '#ffffff';
     miniCtx.lineWidth = 1.5;
@@ -4848,10 +6296,547 @@ function drawMinimap() {
     miniCtx.fill();
     miniCtx.stroke();
   });
-  // จุดตัวเราเอง
-  miniCtx.fillStyle = '#34d399';
-  miniCtx.beginPath(); miniCtx.arc(cx, cy, 4.5, 0, Math.PI * 2); miniCtx.fill();
+  const facing = playerChar3D.root.rotation.y;
+  miniCtx.save();
+  miniCtx.translate(cx, cy);
+  miniCtx.rotate(-facing);
+  miniCtx.fillStyle = '#38bdf8';
+  miniCtx.strokeStyle = '#f8fafc';
+  miniCtx.lineWidth = 1.5;
+  miniCtx.beginPath();
+  miniCtx.moveTo(0, 7); miniCtx.lineTo(5, -5); miniCtx.lineTo(0, -2); miniCtx.lineTo(-5, -5);
+  miniCtx.closePath();
+  miniCtx.fill();
+  miniCtx.stroke();
+  miniCtx.restore();
 }
+const CAR_ROUTE_CELL_SIZE = 5;
+const CAR_ROUTE_CLEARANCE = 5.0;
+const carriageDestinationPanel = document.getElementById('carriage-destination-panel');
+const carriageDestinationSelect = document.getElementById('carriage-destination-select');
+const carriageRouteStatus = document.getElementById('carriage-route-status');
+const openCarriageDestinationButton = document.getElementById('btn-open-carriage-dest');
+let currentCarriageDestinations = [];
+
+function carriagePositionClearance(x, z) {
+  const groundY = worldNoise.getHeight(x, z);
+  let clearance = Math.min(
+    groundY - (WATER_LEVEL + 0.35),
+    5.2 - groundY
+  );
+  const slopeSample = 2.5;
+  for (const [dx, dz] of [[slopeSample, 0], [-slopeSample, 0], [0, slopeSample], [0, -slopeSample]]) {
+    clearance = Math.min(
+      clearance,
+      1.35 - Math.abs(worldNoise.getHeight(x + dx, z + dz) - groundY)
+    );
+  }
+
+  // Chunks may not have been generated along a long carriage trip. Rebuild their
+  // deterministic obstacle positions from the same world seed before routing.
+  const minChunkX = Math.floor((x - CAR_ROUTE_CLEARANCE - 3) / CHUNK_SIZE);
+  const maxChunkX = Math.floor((x + CAR_ROUTE_CLEARANCE + 3) / CHUNK_SIZE);
+  const minChunkZ = Math.floor((z - CAR_ROUTE_CLEARANCE - 3) / CHUNK_SIZE);
+  const maxChunkZ = Math.floor((z + CAR_ROUTE_CLEARANCE + 3) / CHUNK_SIZE);
+  for (let cx = minChunkX; cx <= maxChunkX; cx++) {
+    for (let cz = minChunkZ; cz <= maxChunkZ; cz++) {
+      const centerX = cx * CHUNK_SIZE;
+      const centerZ = cz * CHUNK_SIZE;
+      const nearTown = TOWNS.some(town =>
+        Math.hypot(centerX - town.x, centerZ - town.z) < town.radius + 16
+      );
+      if (nearTown) continue;
+
+      const villageRoll = worldNoise.hash2D(cx * 73, cz * 97);
+      const hasVillage = (villageRoll > 0.72 || (Math.abs(cx) === 2 && cz === 0)) &&
+        worldNoise.getHeight(centerX, centerZ) >= WATER_LEVEL + 1.0;
+      if (hasVillage) {
+        const localX = x - centerX;
+        const localZ = z - centerZ;
+        const fenceX = Math.max(Math.abs(localX) - 11.8, 0);
+        const fenceZ = Math.max(Math.abs(localZ) - 10.6, 0);
+        const outsideFence = Math.hypot(fenceX, fenceZ);
+        const insideFence = Math.min(11.8 - Math.abs(localX), 10.6 - Math.abs(localZ));
+        const fenceDistance = outsideFence > 0 ? outsideFence : -insideFence;
+        clearance = Math.min(clearance, fenceDistance - CAR_ROUTE_CLEARANCE - 0.25);
+
+        for (const [hx, hz, radius] of [[-6.4, -5.2, 3.6], [6.4, -5.2, 3.6], [-6.8, 3.6, 3.6]]) {
+          clearance = Math.min(
+            clearance,
+            Math.hypot(localX - hx, localZ - hz) - CAR_ROUTE_CLEARANCE - radius
+          );
+        }
+        clearance = Math.min(
+          clearance,
+          Math.hypot(localX, localZ - 0.5) - CAR_ROUTE_CLEARANCE - 1.05
+        );
+      }
+
+      for (let idx = 0; idx < 4; idx++) {
+        const rx = worldNoise.hash2D(cx * 31 + idx, cz * 17 + idx);
+        const rz = worldNoise.hash2D(cx * 19 + idx, cz * 43 + idx);
+        const obstacleX = centerX + (rx - 0.5) * (CHUNK_SIZE - 6);
+        const obstacleZ = centerZ + (rz - 0.5) * (CHUNK_SIZE - 6);
+        const obstacleY = worldNoise.getHeight(obstacleX, obstacleZ);
+        if (obstacleY < WATER_LEVEL + 0.3) continue;
+        const isTree = rx > 0.35;
+        const radius = isTree ? 1.35 : 1.4;
+        clearance = Math.min(
+          clearance,
+          Math.hypot(x - obstacleX, z - obstacleZ) - CAR_ROUTE_CLEARANCE - radius
+        );
+      }
+    }
+  }
+
+  forEachWorldColliderInBounds(
+    worldColliders,
+    x - CAR_ROUTE_CLEARANCE,
+    x + CAR_ROUTE_CLEARANCE,
+    z - CAR_ROUTE_CLEARANCE,
+    z + CAR_ROUTE_CLEARANCE,
+    collider => {
+      if (collider.disabled) return;
+      if (collider.topY !== undefined && collider.topY < groundY + 0.8) return;
+      if (collider.type === 'box') {
+        const outsideX = Math.max(collider.minX - x, 0, x - collider.maxX);
+        const outsideZ = Math.max(collider.minZ - z, 0, z - collider.maxZ);
+        const outsideDistance = Math.hypot(outsideX, outsideZ);
+        const edgeDistance = Math.min(x - collider.minX, collider.maxX - x, z - collider.minZ, collider.maxZ - z);
+        const signedDistance = outsideDistance > 0 ? outsideDistance : -edgeDistance;
+        clearance = Math.min(clearance, signedDistance - CAR_ROUTE_CLEARANCE);
+      } else {
+        clearance = Math.min(
+          clearance,
+          Math.hypot(x - collider.x, z - collider.z) - CAR_ROUTE_CLEARANCE - (collider.radius || 0)
+        );
+      }
+    }
+  );
+  return clearance;
+}
+
+function carriagePositionBlocked(x, z) {
+  return carriagePositionClearance(x, z) <= 0;
+}
+
+function carriagePathSegmentBlocked(fromX, fromZ, toX, toZ) {
+  const distance = Math.hypot(toX - fromX, toZ - fromZ);
+  const samples = Math.max(1, Math.ceil(distance / 1.2));
+  let previousClearance = carriagePositionClearance(fromX, fromZ);
+  let exitingInitialOverlap = previousClearance <= 0;
+  for (let i = 1; i <= samples; i++) {
+    const t = i / samples;
+    const clearance = carriagePositionClearance(
+      fromX + (toX - fromX) * t,
+      fromZ + (toZ - fromZ) * t
+    );
+    if (exitingInitialOverlap) {
+      if (clearance <= previousClearance + 0.01) return true;
+      if (clearance > 0) exitingInitialOverlap = false;
+    } else if (clearance <= 0) {
+      return true;
+    }
+    previousClearance = clearance;
+  }
+  return false;
+}
+
+function nearestCarriageGridPoint(gx, gz, blockedAt) {
+  if (!blockedAt(gx, gz)) return { x: gx, z: gz };
+  for (let radius = 1; radius <= 8; radius++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      for (let dz = -radius; dz <= radius; dz++) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
+        if (!blockedAt(gx + dx, gz + dz)) return { x: gx + dx, z: gz + dz };
+      }
+    }
+  }
+  return null;
+}
+
+function buildCarriagePath(startX, startZ, goalX, goalZ) {
+  const blockedCache = new Map();
+  const blockedAt = (gx, gz) => {
+    const key = `${gx},${gz}`;
+    if (!blockedCache.has(key)) {
+      blockedCache.set(key, carriagePositionBlocked(gx * CAR_ROUTE_CELL_SIZE, gz * CAR_ROUTE_CELL_SIZE));
+    }
+    return blockedCache.get(key);
+  };
+  const start = nearestCarriageGridPoint(
+    Math.round(startX / CAR_ROUTE_CELL_SIZE),
+    Math.round(startZ / CAR_ROUTE_CELL_SIZE),
+    blockedAt
+  );
+  const goal = nearestCarriageGridPoint(
+    Math.round(goalX / CAR_ROUTE_CELL_SIZE),
+    Math.round(goalZ / CAR_ROUTE_CELL_SIZE),
+    blockedAt
+  );
+  if (!start || !goal) return null;
+  if (Math.hypot(goal.x * CAR_ROUTE_CELL_SIZE - goalX, goal.z * CAR_ROUTE_CELL_SIZE - goalZ) > 12) return null;
+
+  const minX = Math.min(start.x, goal.x) - 20;
+  const maxX = Math.max(start.x, goal.x) + 20;
+  const minZ = Math.min(start.z, goal.z) - 20;
+  const maxZ = Math.max(start.z, goal.z) + 20;
+  const keyOf = (x, z) => `${x},${z}`;
+  const heuristic = (x, z) => {
+    const dx = Math.abs(goal.x - x);
+    const dz = Math.abs(goal.z - z);
+    return Math.max(dx, dz) + (Math.SQRT2 - 1) * Math.min(dx, dz);
+  };
+  const nodes = new Map();
+  const heap = [];
+  const push = entry => {
+    heap.push(entry);
+    let i = heap.length - 1;
+    while (i > 0) {
+      const parent = Math.floor((i - 1) / 2);
+      if (heap[parent].f <= entry.f) break;
+      heap[i] = heap[parent];
+      i = parent;
+    }
+    heap[i] = entry;
+  };
+  const pop = () => {
+    const first = heap[0];
+    const last = heap.pop();
+    if (heap.length) {
+      let i = 0;
+      while (true) {
+        const left = i * 2 + 1;
+        const right = left + 1;
+        if (left >= heap.length) break;
+        const child = right < heap.length && heap[right].f < heap[left].f ? right : left;
+        if (heap[child].f >= last.f) break;
+        heap[i] = heap[child];
+        i = child;
+      }
+      heap[i] = last;
+    }
+    return first;
+  };
+  const startKey = keyOf(start.x, start.z);
+  nodes.set(startKey, { x: start.x, z: start.z, g: 0, parent: null, closed: false });
+  push({ x: start.x, z: start.z, g: 0, f: heuristic(start.x, start.z) });
+  const directions = [
+    [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
+    [1, 1, Math.SQRT2], [1, -1, Math.SQRT2], [-1, 1, Math.SQRT2], [-1, -1, Math.SQRT2]
+  ];
+  let foundKey = null;
+  let visited = 0;
+  while (heap.length && visited < 36000) {
+    const current = pop();
+    const currentKey = keyOf(current.x, current.z);
+    const currentNode = nodes.get(currentKey);
+    if (!currentNode || currentNode.closed || current.g !== currentNode.g) continue;
+    currentNode.closed = true;
+    visited++;
+    if (current.x === goal.x && current.z === goal.z) {
+      foundKey = currentKey;
+      break;
+    }
+    for (const [dx, dz, cost] of directions) {
+      const nx = current.x + dx;
+      const nz = current.z + dz;
+      if (nx < minX || nx > maxX || nz < minZ || nz > maxZ || blockedAt(nx, nz)) continue;
+      if (dx && dz && (blockedAt(current.x + dx, current.z) || blockedAt(current.x, current.z + dz))) continue;
+      const nextKey = keyOf(nx, nz);
+      const worldX = nx * CAR_ROUTE_CELL_SIZE;
+      const worldZ = nz * CAR_ROUTE_CELL_SIZE;
+      const nextG = current.g + cost * (1 + getCarriageRoadPenalty(worldX, worldZ));
+      let node = nodes.get(nextKey);
+      if (node && node.g <= nextG) continue;
+      if (!node) {
+        node = { x: nx, z: nz, g: nextG, parent: currentKey, closed: false };
+        nodes.set(nextKey, node);
+      } else {
+        node.g = nextG;
+        node.parent = currentKey;
+        node.closed = false;
+      }
+      push({ x: nx, z: nz, g: nextG, f: nextG + heuristic(nx, nz) });
+    }
+  }
+  if (!foundKey) return null;
+  const path = [];
+  let key = foundKey;
+  while (key) {
+    const node = nodes.get(key);
+    path.push({ x: node.x * CAR_ROUTE_CELL_SIZE, z: node.z * CAR_ROUTE_CELL_SIZE });
+    key = node.parent;
+  }
+  path.reverse();
+  if (Math.hypot(path[path.length - 1].x - goalX, path[path.length - 1].z - goalZ) > 1.5 &&
+      !carriagePathSegmentBlocked(path[path.length - 1].x, path[path.length - 1].z, goalX, goalZ)) {
+    path.push({ x: goalX, z: goalZ });
+  }
+  if (Math.hypot(path[path.length - 1].x - goalX, path[path.length - 1].z - goalZ) > 8) return null;
+  let startConnectionIndex = -1;
+  for (let i = Math.min(path.length - 1, 2); i >= 0; i--) {
+    if (!carriagePathSegmentBlocked(startX, startZ, path[i].x, path[i].z)) {
+      startConnectionIndex = i;
+      break;
+    }
+  }
+  if (startConnectionIndex < 0) return null;
+  path.splice(0, startConnectionIndex);
+  path.unshift({ x: startX, z: startZ });
+  return path;
+}
+
+function getCarriageRoadPenalty(x, z) {
+  const town = TOWNS.find(entry => Math.hypot(x - entry.x, z - entry.z) < entry.radius - 4);
+  if (!town) return 0;
+  const dx = x - town.x;
+  const dz = z - town.z;
+  const radius = Math.hypot(dx, dz);
+  const roadDistance = Math.min(
+    Math.abs(dx),
+    Math.abs(dz),
+    Math.abs(radius - 28),
+    Math.abs(radius - 71.5)
+  );
+  return Math.min(roadDistance, 24) * 0.24;
+}
+
+function getCarriageDestinations() {
+  const destinations = [];
+  TOWNS.forEach(town => {
+    destinations.push({
+      id: `town-${town.id}`,
+      townId: town.id,
+      label: `🏛️ ใจกลางเมือง`,
+      x: town.x + 12,
+      z: town.z + 10
+    });
+  });
+  const shopRoles = new Set(['quest', 'inn', 'shop', 'food', 'general_shop', 'fish_market', 'fashion_shop']);
+  enterableBuildings.forEach((building, index) => {
+    if (!shopRoles.has(building.role)) return;
+    const town = TOWNS.find(entry => entry.id === building.townId);
+    if (!town) return;
+    const doorOffset = building.isTwoStory ? building.depth / 2 + 10 : building.depth / 2 + 9;
+    destinations.push({
+      id: `building-${index}`,
+      townId: town.id,
+      label: building.title.replace(/<[^>]*>/g, ''),
+      x: building.wx + Math.sin(building.rotY || 0) * doorOffset,
+      z: building.wz + Math.cos(building.rotY || 0) * doorOffset
+    });
+  });
+  return destinations;
+}
+
+function showCarriageDestinationPanel(car) {
+  const justBoarded = ridingCarriage !== car;
+  car.manualMode = true;
+  ridingCarriage = car;
+  if (justBoarded) {
+    cameraYawAngle = car.group.rotation.y + Math.PI;
+    cameraPitchAngle = 0;
+  }
+  releaseMouseForUI();
+  currentCarriageDestinations = getCarriageDestinations();
+  carriageDestinationSelect.replaceChildren();
+  TOWNS.forEach(town => {
+    const group = document.createElement('optgroup');
+    group.label = `${town.id + 1}. ${town.name}`;
+    currentCarriageDestinations.filter(dest => dest.townId === town.id).forEach(dest => {
+      const option = document.createElement('option');
+      option.value = dest.id;
+      option.textContent = dest.label;
+      group.appendChild(option);
+    });
+    carriageDestinationSelect.appendChild(group);
+  });
+  carriageRouteStatus.textContent = car.routeTarget
+    ? `กำลังเดินทางไป: ${car.routeTarget.label}`
+    : 'รถม้าพร้อมออกเดินทาง เลือกเมืองหรือร้านค้าได้เลย';
+  carriageDestinationPanel.classList.remove('hidden');
+}
+
+function toggleCarriageRide(car) {
+  if (ridingCarriage === car) {
+    ridingCarriage = null;
+    carriageDestinationPanel.classList.add('hidden');
+    openCarriageDestinationButton.classList.add('hidden');
+    addLog('🐎 ลงจากรถม้าเรียบร้อยแล้ว', 'text-amber-300');
+    return;
+  }
+  if (carriageBoarding) return;
+  const playerPos = playerChar3D.root.position;
+  if (Math.hypot(playerPos.x - car.group.position.x, playerPos.z - car.group.position.z) > 7.5) {
+    addLog('🚶 เดินเข้าไปใกล้รถม้าก่อน แล้วคลิกขึ้นรถอีกครั้ง', 'text-amber-300');
+    return;
+  }
+  if (ridingCarriage) ridingCarriage = null;
+  moveTargetPos = null;
+  carriageBoarding = {
+    car,
+    elapsed: 0,
+    startPosition: playerPos.clone(),
+    startRotation: playerChar3D.root.rotation.y
+  };
+  car.boardingPaused = true;
+  playerPhysics.vx = 0;
+  playerPhysics.vy = 0;
+  playerPhysics.vz = 0;
+  playerChar3D.animState = 'walk';
+  addLog(`🐎 กำลังขึ้นรถม้า <b>${car.group.userData.title}</b>...`, 'text-amber-300');
+}
+
+function beginCarriageJourney() {
+  const car = ridingCarriage;
+  const destination = currentCarriageDestinations.find(item => item.id === carriageDestinationSelect.value);
+  if (!car || !destination) {
+    carriageRouteStatus.textContent = 'ไม่พบปลายทาง กรุณาเลือกจุดหมายใหม่';
+    return;
+  }
+  const route = buildCarriagePath(car.group.position.x, car.group.position.z, destination.x, destination.z);
+  if (!route || !route.length) {
+    carriageRouteStatus.textContent = 'หาเส้นทางปลอดภัยไม่พบ รถม้ายังอยู่ที่เดิม';
+    addLog(`⚠️ ไม่พบเส้นทางปลอดภัยไปยัง <b>${destination.label}</b>`, 'text-rose-300');
+    return;
+  }
+  if (route.length < 2 && Math.hypot(car.group.position.x - destination.x, car.group.position.z - destination.z) > 1.6) {
+    route.push({ x: destination.x, z: destination.z });
+  }
+  if (route.length < 2) {
+    car.route = null;
+    car.routeTarget = null;
+    carriageRouteStatus.textContent = `ถึงปลายทางแล้ว: ${destination.label}`;
+    addLog(`📍 รถม้าอยู่ที่ <b>${destination.label}</b> แล้ว`, 'text-emerald-300');
+    return;
+  }
+  car.route = route;
+  car.routeIndex = 0;
+  car.routeTarget = destination;
+  carriageRouteStatus.textContent = `กำลังเดินทางไป: ${destination.label}`;
+  carriageDestinationPanel.classList.add('hidden');
+  document.activeElement?.blur();
+  addLog(`🐎 รถม้าออกเดินทางไปยัง <b>${destination.label}</b> แล้ว`, 'text-amber-300');
+}
+
+document.getElementById('btn-close-carriage-panel').addEventListener('click', () => {
+  carriageDestinationPanel.classList.add('hidden');
+  document.activeElement?.blur();
+});
+openCarriageDestinationButton.addEventListener('click', () => {
+  if (ridingCarriage) showCarriageDestinationPanel(ridingCarriage);
+  openCarriageDestinationButton.blur();
+});
+document.getElementById('btn-start-carriage-route').addEventListener('click', beginCarriageJourney);
+
+function advanceCarriageOnRoute(car, dt, elapsed) {
+  const route = car.route;
+  if (!route || car.routeIndex >= route.length) {
+    car.horseLegs.forEach((leg, idx) => {
+      leg.rotation.x = Math.sin(elapsed * 2 + (idx % 2) * Math.PI) * 0.035;
+    });
+    car.horseGroup.position.y = Math.abs(Math.sin(elapsed * 2)) * 0.015;
+    return;
+  }
+  const target = route[car.routeIndex];
+  const position = car.group.position;
+  const dx = target.x - position.x;
+  const dz = target.z - position.z;
+  const distance = Math.hypot(dx, dz);
+  if (distance < 1.4) {
+    car.routeIndex++;
+    if (car.routeIndex >= route.length) {
+    if (car.orbitDetour) {
+      car.angle = Math.atan2(
+        car.group.position.z - car.town.z,
+        car.group.position.x - car.town.x
+      );
+      car.orbitDetour = null;
+      car.route = null;
+      car.routeTarget = null;
+      return;
+    }
+    const arrivedAt = car.routeTarget;
+    car.route = null;
+    car.routeTarget = null;
+    if (arrivedAt?.silent) return;
+    carriageRouteStatus.textContent = `ถึงปลายทางแล้ว: ${arrivedAt?.label || 'ปลายทาง'}`;
+    addLog(`📍 รถม้าถึง <b>${arrivedAt?.label || 'ปลายทาง'}</b> แล้ว`, 'text-emerald-300');
+    }
+    return;
+  }
+  const moveSpeed = 11;
+  const step = Math.min(distance, moveSpeed * dt);
+  const nextX = position.x + dx / distance * step;
+  const nextZ = position.z + dz / distance * step;
+  if (carriagePathSegmentBlocked(position.x, position.z, nextX, nextZ)) {
+    const targetDestination = car.routeTarget;
+    const reroute = targetDestination && buildCarriagePath(position.x, position.z, targetDestination.x, targetDestination.z);
+    if (!reroute || reroute.length < 2) {
+      car.route = null;
+      car.routeTarget = null;
+      carriageRouteStatus.textContent = 'เส้นทางถูกกีดขวาง รถม้าหยุดอย่างปลอดภัย';
+      addLog('⚠️ เส้นทางรถม้าถูกปิดกั้นและหาเส้นทางใหม่ไม่สำเร็จ รถม้าหยุดแล้ว', 'text-rose-300');
+      return;
+    }
+    car.route = reroute;
+    car.routeIndex = 0;
+    return;
+  }
+  position.set(nextX, worldNoise.getHeight(nextX, nextZ), nextZ);
+  car.group.rotation.y = smoothRotateAngle(car.group.rotation.y, Math.atan2(dx, dz), dt * 5.5);
+  car.wheels.forEach(wheel => { wheel.rotation.x += dt * moveSpeed * 1.5; });
+  car.horseLegs.forEach((leg, idx) => {
+    leg.rotation.x = Math.sin(elapsed * 9 + (idx % 2) * Math.PI) * 0.38;
+  });
+  car.horseGroup.position.y = Math.abs(Math.sin(elapsed * 9)) * 0.055;
+}
+
+function advanceCarriageOnOrbit(car, dt, elapsed) {
+  const angleStep = (car.speed / car.orbitRadius) * dt;
+  const nextAngle = car.angle + angleStep;
+  const nextX = car.town.x + Math.cos(nextAngle) * car.orbitRadius;
+  const nextZ = car.town.z + Math.sin(nextAngle) * car.orbitRadius;
+  const position = car.group.position;
+  const dx = nextX - position.x;
+  const dz = nextZ - position.z;
+
+  if (carriagePathSegmentBlocked(position.x, position.z, nextX, nextZ)) {
+    for (let lookAhead = 0.12; lookAhead <= 1.8; lookAhead += 0.12) {
+      const rejoinAngle = nextAngle + lookAhead;
+      const rejoinX = car.town.x + Math.cos(rejoinAngle) * car.orbitRadius;
+      const rejoinZ = car.town.z + Math.sin(rejoinAngle) * car.orbitRadius;
+      if (carriagePositionBlocked(rejoinX, rejoinZ)) continue;
+      const route = buildCarriagePath(position.x, position.z, rejoinX, rejoinZ);
+      if (!route || !route.length) continue;
+      if (route.length === 1 && Math.hypot(position.x - rejoinX, position.z - rejoinZ) > 1.6) {
+        route.push({ x: rejoinX, z: rejoinZ });
+      }
+      if (route.length < 2) continue;
+      car.route = route;
+      car.routeIndex = 0;
+      car.routeTarget = { x: rejoinX, z: rejoinZ, label: '', silent: true };
+      car.orbitDetour = { rejoinAngle };
+      return;
+    }
+    car.horseLegs.forEach((leg, idx) => {
+      leg.rotation.x = Math.sin(elapsed * 2 + (idx % 2) * Math.PI) * 0.035;
+    });
+    return;
+  }
+
+  car.angle = nextAngle;
+  const groundY = worldNoise.getHeight(nextX, nextZ);
+  position.set(nextX, groundY, nextZ);
+  if (Math.hypot(dx, dz) > 0.001) car.group.rotation.y = Math.atan2(dx, dz);
+  car.wheels.forEach(wheel => { wheel.rotation.x += dt * car.speed * 1.6; });
+  car.horseLegs.forEach((leg, idx) => {
+    leg.rotation.x = Math.sin(elapsed * 10 + (idx % 2) * Math.PI) * 0.45;
+  });
+  car.horseGroup.position.y = Math.abs(Math.sin(elapsed * 10)) * 0.06;
+}
+
 const _tempLabelPos = new THREE.Vector3();
 
 function isObjectAndParentsVisible(obj) {
@@ -4905,6 +6890,7 @@ function updateFloatingLabelsScreenPos() {
 // ============================================================================
 const clock = new THREE.Clock();
 let regenTick = 0;
+let minimapTick = 0;
 let syncTick = 0;
 let splashTick = 0;
 let stepSoundTick = 0;
@@ -4921,15 +6907,13 @@ function resolveCameraObstacleCollision(pivotPos, desiredCamPos, playerY) {
 
   let safeDist = totalDist;
   const camRadius = 0.28;
-  // กำหนดระยะห่างขั้นต่ำจากตัวละคร (1.15m) เพื่อป้องกันไม่ให้กล้องถูกดันเข้ามาซ้อนในหัวหรือลำตัวตัวละครเด็ดขาด!
   const minAllowedDist = 1.15;
-
-  // เช็คเฉพาะเมื่ออยู่ในอาคาร และไม่ได้เปิดโหมด 2.5D มองทะลุหลังคาจากมุมสูง
   const isCutawayTopView = (cameraMode === '2.5d' && cameraPitchAngle > 0.34) || cameraMode === 'bird';
 
   if (!isCutawayTopView) {
     for (let i = 0; i < enterableBuildings.length; i++) {
       const eb = enterableBuildings[i];
+      if (Math.abs(pivotPos.x - eb.wx) > eb.width || Math.abs(pivotPos.z - eb.wz) > eb.depth) continue;
       const halfW = eb.width * 0.5 - 0.35;
       const halfD = eb.depth * 0.5 - 0.35;
       if (Math.abs(pivotPos.x - eb.wx) < halfW && Math.abs(pivotPos.z - eb.wz) < halfD) {
@@ -4960,73 +6944,147 @@ function resolveCameraObstacleCollision(pivotPos, desiredCamPos, playerY) {
     }
   }
 
-  // เช็คการชนเฉพาะกับกำแพงและสิ่งก่อสร้างขนาดใหญ่ (ข้ามเก้าอี้ โต๊ะ ขั้นบันได และเฟอร์นิเจอร์เตี้ยๆ ไม่ให้ดีดกล้องเข้าหาตัวละคร)
-  for (let c = 0; c < worldColliders.length; c++) {
-    const col = worldColliders[c];
-    if (col.disabled || col.stepable) continue;
-
-    const topY = col.topY !== undefined ? col.topY : 999;
-    const bottomY = col.bottomY !== undefined ? col.bottomY : -999;
-    const colHeight = topY - (col.bottomY !== undefined ? col.bottomY : playerY);
-
-    // ข้ามเฟอร์นิเจอร์เตี้ยๆ เช่น โต๊ะ เก้าอี้ เคาน์เตอร์บาร์ หรือรั้วเตี้ย (ที่มีความสูงไม่ถึง 2.2 เมตร)
-    if (colHeight < 2.2) continue;
-
-    let minX, maxX, minZ, maxZ;
-    if (col.minX !== undefined && col.maxX !== undefined) {
-      minX = col.minX - camRadius;
-      maxX = col.maxX + camRadius;
-      minZ = col.minZ - camRadius;
-      maxZ = col.maxZ + camRadius;
-    } else {
-      const hw = col.halfW ?? col.hx ?? (col.w !== undefined ? col.w * 0.5 : (col.width !== undefined ? col.width * 0.5 : 0));
-      const hd = col.halfD ?? col.hz ?? (col.d !== undefined ? col.d * 0.5 : (col.depth !== undefined ? col.depth * 0.5 : 0));
-      if (hw > 0 && hd > 0 && col.x !== undefined) {
-        minX = col.x - hw - camRadius;
-        maxX = col.x + hw + camRadius;
-        minZ = col.z - hd - camRadius;
-        maxZ = col.z + hd + camRadius;
+  // กรองเฉพาะ Collider ที่อยู่ใกล้ผู้เล่นในระยะ 16 เมตรก่อนคำนวณ Ray-Box (ลดภาระ CPU 95%)
+  const maxCheckRange = totalDist + 6.0;
+  forEachWorldColliderInBounds(
+    worldColliders,
+    pivotPos.x - maxCheckRange,
+    pivotPos.x + maxCheckRange,
+    pivotPos.z - maxCheckRange,
+    pivotPos.z + maxCheckRange,
+    col => {
+      if (col.disabled || col.stepable) return;
+      if (col.x !== undefined && (Math.abs(col.x - pivotPos.x) > maxCheckRange || Math.abs(col.z - pivotPos.z) > maxCheckRange)) {
+        return;
       }
-    }
 
-    if (minX !== undefined) {
-      // ถ้าระนาบจุดหมุนกล้อง (ตัวผู้เล่น) ยืนชิดอยู่ในกรอบ Collider นั้นอยู่แล้ว ให้ข้ามเพื่อไม่ให้ตีกลับเป็นระยะ 0
-      if (pivotPos.x >= minX && pivotPos.x <= maxX && pivotPos.z >= minZ && pivotPos.z <= maxZ) {
-        continue;
-      }
-      const minY = bottomY - 0.1;
-      const maxY = topY + 0.1;
-      let tMin = 0, tMax = safeDist, hitBox = true;
-      const axes = [
-        [pivotPos.x, dir.x, minX, maxX],
-        [pivotPos.y, dir.y, minY, maxY],
-        [pivotPos.z, dir.z, minZ, maxZ]
-      ];
-      for (let a = 0; a < 3; a++) {
-        const [orig, d, bMin, bMax] = axes[a];
-        if (Math.abs(d) < 1e-6) {
-          if (orig < bMin || orig > bMax) { hitBox = false; break; }
-        } else {
-          let t1 = (bMin - orig) / d;
-          let t2 = (bMax - orig) / d;
-          if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
-          tMin = Math.max(tMin, t1);
-          tMax = Math.min(tMax, t2);
-          if (tMin > tMax) { hitBox = false; break; }
+      const topY = col.topY !== undefined ? col.topY : 999;
+      const bottomY = col.bottomY !== undefined ? col.bottomY : -999;
+      if (topY - (col.bottomY !== undefined ? col.bottomY : playerY) < 2.2) return;
+
+      let minX, maxX, minZ, maxZ;
+      if (col.minX !== undefined && col.maxX !== undefined) {
+        if (pivotPos.x < col.minX - maxCheckRange || pivotPos.x > col.maxX + maxCheckRange ||
+            pivotPos.z < col.minZ - maxCheckRange || pivotPos.z > col.maxZ + maxCheckRange) return;
+        minX = col.minX - camRadius;
+        maxX = col.maxX + camRadius;
+        minZ = col.minZ - camRadius;
+        maxZ = col.maxZ + camRadius;
+      } else {
+        const hw = col.halfW ?? col.hx ?? (col.w !== undefined ? col.w * 0.5 : (col.width !== undefined ? col.width * 0.5 : 0));
+        const hd = col.halfD ?? col.hz ?? (col.d !== undefined ? col.d * 0.5 : (col.depth !== undefined ? col.depth * 0.5 : 0));
+        if (hw > 0 && hd > 0 && col.x !== undefined) {
+          minX = col.x - hw - camRadius;
+          maxX = col.x + hw + camRadius;
+          minZ = col.z - hd - camRadius;
+          maxZ = col.z + hd + camRadius;
         }
       }
-      if (hitBox && tMax > 0 && tMin > 0.35 && tMin < safeDist) {
-        safeDist = Math.min(safeDist, Math.max(minAllowedDist, tMin - 0.15));
+
+      if (minX !== undefined) {
+        if (pivotPos.x >= minX && pivotPos.x <= maxX && pivotPos.z >= minZ && pivotPos.z <= maxZ) return;
+        const minY = bottomY - 0.1;
+        const maxY = topY + 0.1;
+        let tMin = 0, tMax = safeDist, hitBox = true;
+        const axes = [
+          [pivotPos.x, dir.x, minX, maxX],
+          [pivotPos.y, dir.y, minY, maxY],
+          [pivotPos.z, dir.z, minZ, maxZ]
+        ];
+        for (let a = 0; a < 3; a++) {
+          const [orig, d, bMin, bMax] = axes[a];
+          if (Math.abs(d) < 1e-6) {
+            if (orig < bMin || orig > bMax) { hitBox = false; break; }
+          } else {
+            let t1 = (bMin - orig) / d;
+            let t2 = (bMax - orig) / d;
+            if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+            tMin = Math.max(tMin, t1);
+            tMax = Math.min(tMax, t2);
+            if (tMin > tMax) { hitBox = false; break; }
+          }
+        }
+        if (hitBox && tMax > 0 && tMin > 0.35 && tMin < safeDist) {
+          safeDist = Math.min(safeDist, Math.max(minAllowedDist, tMin - 0.15));
+        }
       }
     }
-  }
+  );
 
-  // ป้องกันกล้องมุดใต้พื้นดิน
   const finalPos = pivotPos.clone().addScaledVector(dir, safeDist);
   const finalGround = worldNoise.getHeight(finalPos.x, finalPos.z);
   finalPos.y = Math.max(finalPos.y, finalGround + 0.45);
   return finalPos;
 }
+let isPlayerDead = false;
+let playerRespawnInvulnerableUntil = 0;
+function handlePlayerDeath(reasonText = "พ่ายแพ้ในการต่อสู้") {
+  if (isPlayerDead) return;
+  isPlayerDead = true;
+  playerStats.hp = 0;
+  playerPhysics.vx = 0;
+  playerPhysics.vy = 0;
+  playerPhysics.vz = 0;
+  playerPhysics.jumpCount = 0;
+  moveTargetPos = null;
+  activeHarvestNode = null;
+  activeSittingSeat = null;
+  activeSleepingBed = null;
+  ridingCarriage = null;
+  if (carriageBoarding) carriageBoarding.car.boardingPaused = false;
+  carriageBoarding = null;
+  carriageDestinationPanel.classList.add('hidden');
+  openCarriageDestinationButton.classList.add('hidden');
+  comboInputQueued = false;
+  playerChar3D.attackTimer = 0;
+  playerChar3D.deathProgress = 0;
+  Object.keys(keys).forEach(key => { keys[key] = false; });
+  releaseMouseForUI();
+  updateHUD();
+  sound.sfxHit();
+  playerChar3D.animState = 'death';
+  document.getElementById('death-reason').textContent = reasonText;
+  const deathScreen = document.getElementById('death-screen');
+  const respawnButton = document.getElementById('btn-respawn');
+  respawnButton.disabled = true;
+  respawnButton.textContent = 'กำลังรอฟื้นคืนชีพ...';
+  deathScreen.classList.remove('hidden');
+  showFloatingDamage(playerChar3D.root.position, `💀 HP หมด! (${reasonText})`, '#ef4444');
+  addLog(`💀 <b>คุณหมดสติ (${reasonText})!</b> กดปุ่มเกิดใหม่เพื่อฟื้นฟูที่เมืองใกล้ที่สุด`, "text-rose-400 font-bold");
+
+  setTimeout(() => {
+    if (!isPlayerDead) return;
+    respawnButton.disabled = false;
+    respawnButton.textContent = '✨ เกิดใหม่ที่เมืองใกล้ที่สุด';
+  }, 1400);
+}
+document.getElementById('btn-respawn').addEventListener('click', () => {
+  if (!isPlayerDead) return;
+  const nearestTown = getNearestTownToPosition(playerChar3D.root.position);
+  const spawnX = nearestTown.x;
+  const spawnZ = nearestTown.z + 12;
+  const spawnY = worldNoise.getHeight(spawnX, spawnZ);
+  playerChar3D.root.position.set(spawnX, spawnY, spawnZ);
+  playerPhysics.vx = 0;
+  playerPhysics.vy = 0;
+  playerPhysics.vz = 0;
+  playerPhysics.jumpCount = 0;
+  playerPhysics.isGrounded = true;
+  playerPhysics.isInWater = false;
+  playerPhysics.targetRotY = 0;
+  playerChar3D.root.rotation.y = 0;
+  playerStats.hp = Math.round(playerStats.maxHp * 0.5);
+  playerStats.hunger = Math.max(40, playerStats.hunger || 40);
+  playerChar3D.animState = 'idle';
+  playerChar3D.deathProgress = 0;
+  isPlayerDead = false;
+  playerRespawnInvulnerableUntil = Date.now() + 3000;
+  document.getElementById('death-screen').classList.add('hidden');
+  spawnWaterSplashRing(playerChar3D.root.position, 0x34d399, 3.0);
+  updateHUD();
+  savePlayerToRTDB();
+  addLog(`✨ ฟื้นคืนสติที่ <b>${nearestTown.name}</b> (HP 50% — ใช้โพชั่นหรืออาหารย่างเพื่อฟื้นฟู HP เพิ่มเติม)`, "text-emerald-300 font-bold");
+});
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
@@ -5055,14 +7113,39 @@ function animate() {
   } else if (gameState === 'world') {
     updateDynamicLighting(elapsed);
     const pPos = playerChar3D.root.position;
+    window.__AETHEL_PLAYER_POS = pPos;
+    updateCombatMusic(dt);
+    playerPhysics.dashCooldown = Math.max(0, playerPhysics.dashCooldown - dt);
+    playerPhysics.dashTimer = Math.max(0, playerPhysics.dashTimer - dt);
+    playerPhysics.dashInvulnerability = Math.max(0, playerPhysics.dashInvulnerability - dt);
     // 1. อัปเดตวงจรวัน-คืน และสภาพอากาศตามธรรมชาติ
     updateDayNightAndNaturalWeather(elapsed, dt, pPos);
-    // 2. เจน Chunks ตามระยะตั้งค่า และซ่อน Chunks / NPC / มอนสเตอร์ที่อยู่นอกระยะสายตาอัตโนมัติ
+    if (renderer.shadowMap.enabled && dirLight.castShadow) {
+      shadowRefreshTimer -= dt;
+      if (shadowRefreshTimer <= 0) {
+        shadowRefreshTimer = 0.45;
+        renderer.shadowMap.needsUpdate = true;
+        dirLight.shadow.needsUpdate = true;
+      }
+    }
+    // 2. จำกัดการสร้าง Chunk ใหม่ไม่ให้เกิน 1 Chunk ต่อเฟรม (ป้องกันอาการกระตุก/ค้างจังหวะวิ่งไว)
+    let chunksGeneratedThisFrame = 0;
+    const throttledGenerateChunk = (cx, cz) => {
+      const key = `${cx},${cz}`;
+      if (chunkMap.has(key)) return;
+      if (chunksGeneratedThisFrame >= 1) return; // สร้างสูงสุดแค่วินาทีละ 1 Chunk ต่อเฟรม ที่เหลือทยอยสร้างเฟรมถัดไป
+      chunksGeneratedThisFrame++;
+      generateChunk(cx, cz).catch(error => {
+        console.error(`Unable to generate map chunk ${key}:`, error);
+        addLog(`⚠️ สร้างพื้นที่แผนที่ ${key} ไม่สำเร็จ ลองโหลดพื้นที่ใหม่`, 'text-rose-300');
+      });
+    };
+
     updatePerformanceOptimization(dt, {
       playerPos: pPos,
       CHUNK_SIZE,
       chunkMap,
-      generateChunk,
+      generateChunk: throttledGenerateChunk,
       monsters,
       wanderingNPCs,
       npcs,
@@ -5090,30 +7173,77 @@ function animate() {
     updateWorldEnvironment(dt, elapsed, wildlifeList, farmingNodes, interactiveDoors);
     // 3.1 อัปเดตรถม้าเคลื่อนที่รอบมหานคร (หมุนล้อ ขยับขาม้า และพาลูกค้าหรือผู้เล่นนั่งชมเมือง)
     animatedCarriages.forEach((car) => {
-      if (car._culled && ridingCarriage !== car) return;
-      const angStep = (car.speed / car.orbitRadius) * dt;
-      car.angle += angStep;
-      const nx = car.town.x + Math.cos(car.angle) * car.orbitRadius;
-      const nz = car.town.z + Math.sin(car.angle) * car.orbitRadius;
-      const dx = nx - car.group.position.x;
-      const dz = nz - car.group.position.z;
-      const gy = worldNoise.getHeight(nx, nz);
-      car.group.position.set(nx, gy, nz);
-      if (Math.hypot(dx, dz) > 0.001) {
-        car.group.rotation.y = Math.atan2(dx, dz);
+      if (car._culled && ridingCarriage !== car && carriageBoarding?.car !== car && !car.manualMode && !car.orbitDetour) return;
+      const followingPath = car.manualMode || !!car.orbitDetour;
+      if (car.boardingPaused) {
+        car.horseLegs.forEach((leg, idx) => {
+          leg.rotation.x = Math.sin(elapsed * 2 + (idx % 2) * Math.PI) * 0.025;
+        });
+      } else if (followingPath) {
+        advanceCarriageOnRoute(car, dt, elapsed);
+      } else {
+        advanceCarriageOnOrbit(car, dt, elapsed);
       }
-      car.wheels.forEach(w => { w.rotation.x += dt * car.speed * 1.6; });
-      car.horseLegs.forEach((leg, idx) => {
-        leg.rotation.x = Math.sin(elapsed * 10 + (idx % 2) * Math.PI) * 0.45;
-      });
-      car.horseGroup.position.y = Math.abs(Math.sin(elapsed * 10)) * 0.06;
+      car.driver.animState = 'sit';
+      car.driver.updateAnimation(dt, followingPath ? 0.08 : 0.02, false, 0, 0, false);
+      if (carriageBoarding?.car === car) {
+        carriageBoarding.elapsed += dt;
+        car.group.updateMatrixWorld(true);
+        const progress = Math.min(1, carriageBoarding.elapsed / 1.05);
+        const approach = car.group.localToWorld(new THREE.Vector3(-1.65, 0, 0));
+        const seat = car.group.localToWorld(new THREE.Vector3(0, 1.18, -0.58));
+        const approachY = worldNoise.getHeight(approach.x, approach.z) + 0.06;
+        const approachProgress = THREE.MathUtils.clamp(progress / 0.52, 0, 1);
+        const seatProgress = THREE.MathUtils.clamp((progress - 0.52) / 0.48, 0, 1);
+        const smoothApproach = approachProgress * approachProgress * (3 - 2 * approachProgress);
+        const smoothSeat = seatProgress * seatProgress * (3 - 2 * seatProgress);
+
+        if (progress < 0.52) {
+          playerChar3D.root.position.lerpVectors(
+            carriageBoarding.startPosition,
+            new THREE.Vector3(approach.x, approachY, approach.z),
+            smoothApproach
+          );
+          playerChar3D.animState = 'walk';
+        } else {
+          playerChar3D.root.position.lerpVectors(
+            new THREE.Vector3(approach.x, approachY, approach.z),
+            seat,
+            smoothSeat
+          );
+          playerChar3D.animState = 'sit';
+        }
+        playerChar3D.root.rotation.y = smoothRotateAngle(
+          playerChar3D.root.rotation.y,
+          car.group.rotation.y,
+          dt * 9
+        );
+        playerPhysics.vx = 0;
+        playerPhysics.vy = 0;
+        playerPhysics.vz = 0;
+
+        if (progress >= 1) {
+          carriageBoarding = null;
+          car.boardingPaused = false;
+          showCarriageDestinationPanel(car);
+          openCarriageDestinationButton.classList.remove('hidden');
+          playerChar3D.animState = 'sit';
+          addLog(`🐎 ขึ้นนั่ง <b>${car.group.userData.title}</b> แล้ว เลือกปลายทางได้จากแผนที่`, 'text-emerald-300 font-bold');
+        }
+      }
       if (ridingCarriage === car) {
-        pPos.set(nx, gy + 1.15, nz);
+        const seatOffset = 0.58;
+        pPos.set(
+          car.group.position.x - Math.sin(car.group.rotation.y) * seatOffset,
+          car.group.position.y + 1.18,
+          car.group.position.z - Math.cos(car.group.rotation.y) * seatOffset
+        );
         playerPhysics.vx = 0; playerPhysics.vy = 0; playerPhysics.vz = 0;
         playerPhysics.isGrounded = true;
         playerChar3D.animState = 'sit';
         playerPhysics.targetRotY = car.group.rotation.y;
       }
+      if (followingPath) return;
     });
     // 3.2 เปิดประตูหน้าอาคารอัตโนมัติเมื่อเดินเข้าใกล้ และสลับการมองเห็นชั้น 1 / ชั้น 2 ของโรงเตี๋ยม 2 ชั้นอัจฉริยะ!
     interactiveDoors.forEach((d) => {
@@ -5204,20 +7334,35 @@ function animate() {
     }
     // 5. ระบบการเคลื่อนที่ WASD + ระบบวิ่งไว (Sprint) & หลอด Stamina
     let inputX = 0, inputZ = 0;
-    if (keys['w'] || keys['arrowup']) inputZ -= 1;
-    if (keys['s'] || keys['arrowdown']) inputZ += 1;
-    if (keys['a'] || keys['arrowleft']) inputX -= 1;
-    if (keys['d'] || keys['arrowright']) inputX += 1;
-    const isTryingToMove = (inputX !== 0 || inputZ !== 0 || moveTargetPos !== null);
+    const isMovementLockedBySkill = !!classCombatState.fighterUltimate;
+    if (!isPlayerDead && !carriageBoarding && !isMovementLockedBySkill && playerPhysics.dashTimer <= 0) {
+      if (keys['w'] || keys['arrowup']) inputZ -= 1;
+      if (keys['s'] || keys['arrowdown']) inputZ += 1;
+      if (keys['a'] || keys['arrowleft']) inputX -= 1;
+      if (keys['d'] || keys['arrowright']) inputX += 1;
+    }
+    if (isPlayerDead) {
+      moveTargetPos = null;
+      playerPhysics.vx = 0;
+      playerPhysics.vz = 0;
+    }
+    const isTryingToMove = !carriageBoarding && !isMovementLockedBySkill &&
+      (inputX !== 0 || inputZ !== 0 || moveTargetPos !== null || playerPhysics.dashTimer > 0);
+    if (isTryingToMove && activeSittingSeat) {
+      activeSittingSeat = null;
+      playerChar3D.sitPelvisY = undefined;
+    }
     const isSprinting = isTryingToMove && keys['shift'] && playerStats.stamina > 2;
     if (isSprinting) {
       playerStats.stamina = Math.max(0, playerStats.stamina - 6.0 * dt);
     } else {
       playerStats.stamina = Math.min(playerStats.maxStamina, playerStats.stamina + 16 * dt);
     }
-    const sprintMult = isSprinting ? 2.40 : 1.0;
+    const sprintMult = isSprinting ? 2.95 : 1.0; // เพิ่มความเร็วตอนวิ่งให้พุ่งสะใจขึ้น
+    updateSprintWindFX(scene, playerChar3D.root, isSprinting || playerPhysics.dashTimer > 0, dt); // แสดงเส้นลมวิ่งสวนกระแส
+    updateGraphicsSystem(elapsed, pPos, worldGroup, dt); // อัปเดตฟิสิกส์หญ้าพลิ้วและแสงจากวัตถุเรืองแสงใกล้ผู้เล่น
     const waterFactor = playerPhysics.isInWater ? 0.68 : 1.0;
-    const maxSpeed = playerStats.spd * 0.82 * waterFactor * sprintMult;
+    const maxSpeed = playerPhysics.dashTimer > 0 ? 34 : playerStats.spd * 0.82 * waterFactor * sprintMult;
     const accel = (isSprinting ? 68.0 : 46.0) * waterFactor;
     if (inputX !== 0 || inputZ !== 0) {
       moveTargetPos = null;
@@ -5260,9 +7405,9 @@ function animate() {
     playerChar3D.root.rotation.y = smoothRotateAngle(
       playerChar3D.root.rotation.y,
       playerPhysics.targetRotY,
-      dt * 14
+      dt * (isTryingToMove ? 8.5 : 4.2)
     );
-    const damping = playerPhysics.isGrounded ? 8.5 : 3.5;
+    const damping = playerPhysics.dashTimer > 0 ? 1.8 : playerPhysics.isGrounded ? 8.5 : 3.5;
     playerPhysics.vx *= Math.exp(-damping * dt);
     playerPhysics.vz *= Math.exp(-damping * dt);
     const horizSpeed = Math.hypot(playerPhysics.vx, playerPhysics.vz);
@@ -5273,22 +7418,33 @@ function animate() {
     pPos.x += playerPhysics.vx * dt;
     pPos.z += playerPhysics.vz * dt;
     if (horizSpeed > 1.5 && playerPhysics.isGrounded && !playerPhysics.isInWater) {
-      stepSoundTick += dt * (isSprinting ? 1.5 : 1.0);
-      if (stepSoundTick > 0.34) {
+      stepSoundTick += dt * (isSprinting ? 1.85 : 1.0);
+      if (stepSoundTick > 0.32) {
         stepSoundTick = 0;
-        sound.sfxStep();
+        sound.sfxStep(isSprinting);
       }
     }
     // 6. ตรวจจับการชนกำแพงเมือง รั้วหมู่บ้าน และบ้านทุกหลัง
     let supportY = worldNoise.getHeight(pPos.x, pPos.z);
-    supportY = resolveWorldCollisions(pPos, 0.48, supportY, worldColliders);
+    if (!ridingCarriage && !carriageBoarding) {
+      supportY = resolveWorldCollisions(pPos, 0.48, supportY, worldColliders);
+    }
     // 7. ฟิสิกส์การเดินลุยน้ำและว่ายน้ำ
     const wasInWater = playerPhysics.isInWater;
     const isSubmerged = supportY < WATER_LEVEL - 0.45;
     const isWading = supportY < WATER_LEVEL + 0.12 && !isSubmerged;
     playerPhysics.isInWater = isSubmerged;
     const waterStateEl = document.getElementById('hud-water-state');
-    if (isSubmerged) {
+    if (ridingCarriage) {
+      pPos.y = ridingCarriage.group.position.y + 1.18;
+      playerPhysics.vy = 0;
+      playerPhysics.isGrounded = true;
+      playerPhysics.isInWater = false;
+    } else if (carriageBoarding) {
+      playerPhysics.vy = 0;
+      playerPhysics.isGrounded = true;
+      playerPhysics.isInWater = false;
+    } else if (isSubmerged) {
       waterStateEl.textContent = "🏊 กำลังว่ายน้ำ";
       waterStateEl.className = "text-[10px] text-cyan-300 font-bold";
       if (!wasInWater) {
@@ -5320,18 +7476,28 @@ function animate() {
           spawnWaterSplashRing(pPos, 0xbae6fd, 1.3);
         }
       } else {
-        waterStateEl.textContent = isSprinting ? "⚡ กำลังวิ่งไว (Sprint)" : "🏃 อยู่บนบก";
-        waterStateEl.className = isSprinting ? "text-[10px] text-amber-300 font-bold" : "text-[10px] text-emerald-300";
-      }
-      playerPhysics.vy -= 26.0 * dt;
-      pPos.y += playerPhysics.vy * dt;
-      if (pPos.y <= supportY) {
-        pPos.y = supportY;
-        playerPhysics.vy = 0;
-        playerPhysics.isGrounded = true;
-        playerPhysics.jumpCount = 0;
-      } else {
-        playerPhysics.isGrounded = false;
+        const mageFlying = currentConfig.classId === 'mage' && keys[' '] && playerStats.mp > 0;
+        if (mageFlying) {
+          waterStateEl.textContent = "🪽 กำลังบิน (ใช้มานา)";
+          waterStateEl.className = "text-[10px] text-violet-300 font-bold";
+          playerStats.mp = Math.max(0, playerStats.mp - 8 * dt);
+          playerPhysics.vy = keys['shift'] ? -4.5 : 0;
+          pPos.y += (keys['shift'] ? -4.5 : 5.2) * dt;
+          playerPhysics.isGrounded = false;
+        } else {
+          waterStateEl.textContent = isSprinting ? "⚡ กำลังวิ่งไว (Sprint)" : "🏃 อยู่บนบก";
+          waterStateEl.className = isSprinting ? "text-[10px] text-amber-300 font-bold" : "text-[10px] text-emerald-300";
+          playerPhysics.vy -= 26.0 * dt;
+          pPos.y += playerPhysics.vy * dt;
+          if (pPos.y <= supportY) {
+            pPos.y = supportY;
+            playerPhysics.vy = 0;
+            playerPhysics.isGrounded = true;
+            playerPhysics.jumpCount = 0;
+          } else {
+            playerPhysics.isGrounded = false;
+          }
+        }
       }
     }
     // 8. อัปเดตความคืบหน้าการฟาร์มของ
@@ -5363,8 +7529,13 @@ function animate() {
       }
     }
     const baseSpeed = playerStats.spd * 0.82 * waterFactor;
-    const speedRatio = Math.min(2.4, horizSpeed / baseSpeed);
-    const turnDelta = playerChar3D.root.rotation.y - playerPhysics.prevRotY;
+    const speedRatio = carriageBoarding
+      ? (carriageBoarding.elapsed < 0.55 ? 0.42 : 0.16)
+      : Math.min(2.4, horizSpeed / baseSpeed);
+    const turnDelta = Math.atan2(
+      Math.sin(playerChar3D.root.rotation.y - playerPhysics.prevRotY),
+      Math.cos(playerChar3D.root.rotation.y - playerPhysics.prevRotY)
+    );
     playerPhysics.prevRotY = playerChar3D.root.rotation.y;
     playerChar3D.updateAnimation(
       dt,
@@ -5579,26 +7750,48 @@ function animate() {
         m.vy = 0;
       }
       let isMonMoving = false;
-      if (dist < 12.0 && dist > 1.85 && Math.hypot(m.vx, m.vz) < 1.5) {
+      if (m.stunTimer > 0) {
+        m.stunTimer = Math.max(0, m.stunTimer - dt);
+      } else if (dist < (m.isBoss ? 24 : 12.0) && dist > (m.attackRange || 2.1) && Math.hypot(m.vx, m.vz) < 1.5) {
         // ไล่ล่าผู้เล่นเมื่อเข้าใกล้
         isMonMoving = true;
         const ang = Math.atan2(pPos.x - m.mesh.position.x, pPos.z - m.mesh.position.z);
         m.mesh.rotation.y = smoothRotateAngle(m.mesh.rotation.y, ang, dt * 10);
-        m.mesh.position.x += Math.sin(ang) * 3.3 * dt;
-        m.mesh.position.z += Math.cos(ang) * 3.3 * dt;
-      } else if (dist <= 2.1) {
+        const chaseSpeed = m.slowTimer > 0 ? 1.5 : 3.3;
+        m.mesh.position.x += Math.sin(ang) * chaseSpeed * dt;
+        m.mesh.position.z += Math.cos(ang) * chaseSpeed * dt;
+      } else if (dist <= (m.attackRange || 2.1) && Date.now() >= playerRespawnInvulnerableUntil && playerPhysics.dashInvulnerability <= 0) {
         m.atkCooldown -= dt;
         if (m.atkCooldown <= 0) {
-          m.atkCooldown = 1.6;
+          m.atkCooldown = m.isBoss ? 2.4 : 1.6;
+          if (m.isBoss) spawnCombatBurst(m.mesh.position.clone().add(new THREE.Vector3(0, 0.08, 0)), 0xf97316, 7.4);
           const rawDmg = Math.max(2, Math.round(m.atk - playerStats.def * 0.45));
-          const finalDmg = currentConfig.classId === 'tank' ? Math.round(rawDmg * 0.7) : rawDmg;
-          playerStats.hp = Math.max(1, playerStats.hp - finalDmg);
+          let remainingDamage = rawDmg;
+          if (classCombatState.tankShieldTimer > 0 && classCombatState.tankShield > 0) {
+            const absorbed = Math.min(classCombatState.tankShield, remainingDamage);
+            classCombatState.tankShield -= absorbed;
+            remainingDamage -= absorbed;
+            if (absorbed > 0) showFloatingDamage(pPos, `🛡️ โล่ -${absorbed}`, '#60a5fa');
+          }
+          if (currentConfig.classId === 'tank' && playerStats.hp / playerStats.maxHp < 0.1 && playerStats.mp > 0) {
+            const manaAbsorbed = Math.min(playerStats.mp, remainingDamage);
+            playerStats.mp -= manaAbsorbed;
+            remainingDamage -= manaAbsorbed;
+            if (manaAbsorbed > 0) showFloatingDamage(pPos, `💧 มานารับ -${manaAbsorbed}`, '#38bdf8');
+          }
+          const finalDmg = Math.max(0, Math.round(remainingDamage));
+          playerStats.hp = Math.max(0, playerStats.hp - finalDmg);
           const pushAng = Math.atan2(pPos.x - m.mesh.position.x, pPos.z - m.mesh.position.z);
           playerPhysics.vx += Math.sin(pushAng) * 5.2;
           playerPhysics.vz += Math.cos(pushAng) * 5.2;
-          sound.sfxHit();
-          showFloatingDamage(pPos, `-${finalDmg}`, '#fb7185');
+          if (finalDmg > 0) {
+            sound.sfxHit();
+            showFloatingDamage(pPos, `-${finalDmg}`, '#fb7185');
+          }
           updateHUD();
+          if (playerStats.hp <= 0) {
+            handlePlayerDeath(`ถูก ${m.name} โจมตี`);
+          }
         }
       } else if (Math.hypot(m.vx, m.vz) < 0.5) {
         // เดินลาดตระเวนรอบจุดเกิด (Patrol AI) เพื่อให้มอนสเตอร์ทุกตัวขยับและมีอนิเมชั่นตลอดเวลา!
@@ -5654,6 +7847,7 @@ function animate() {
       }
     }
     skillFX.update(dt);
+    updateClassCombatState(dt);
     for (let i = vfxRings.length - 1; i >= 0; i--) {
       const v = vfxRings[i];
       v.age += dt * 2.8;
@@ -5689,14 +7883,22 @@ function animate() {
         playerStats.savedSpawn = null;
         savePlayerToRTDB();
       }
-      playerStats.hp = Math.min(playerStats.maxHp, playerStats.hp + (currentConfig.classId === 'support' ? 3 : 1));
-      playerStats.mp = Math.min(playerStats.maxMp, playerStats.mp + (currentConfig.classId === 'mage' ? 4 : 1.5));
+      // เอา Auto HP Regen ออกทั้งหมด! (ฟื้นฟูเฉพาะ MP เล็กน้อยเท่านั้น)
+      playerStats.mp = Math.min(playerStats.maxMp, playerStats.mp + (currentConfig.classId === 'mage' ? 2.5 : 1.0));
       document.getElementById('hud-coords').textContent = `${Math.round(pPos.x)}, ${Math.round(pPos.z)}`;
       document.getElementById('hud-biome').textContent = `📍 ${worldNoise.getBiome(pPos.x, pPos.z)}`;
       updateHUD();
+    }
+    minimapTick += dt;
+    if (minimapTick >= 1) {
+      minimapTick -= 1;
       drawMinimap();
     }
-    updateFloatingLabelsScreenPos();
+    floatingLabelsUpdateTimer -= dt;
+    if (floatingLabelsUpdateTimer <= 0) {
+      floatingLabelsUpdateTimer = 0.1;
+      updateFloatingLabelsScreenPos();
+    }
   }
   // เรนเดอร์ผ่าน Post-Processing หรือเรนเดอร์ตรงความเร็วสูงหากผู้เล่นปิด Reshade ในตั้งค่า
   if (gameSettings.usePostProc) {
@@ -5710,6 +7912,8 @@ function animate() {
     () => {},
     releaseMouseForUI
   );
+  injectAdvancedGraphicsSettingsUI();
+  injectModernUXUIPolish();
 
 animate();
 window.addEventListener('resize', () => {
@@ -5718,3 +7922,1853 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
   postProc.setSize(window.innerWidth, window.innerHeight);
 });
+
+// ============================================================================
+// 15. EXPANSION UPDATE: มือถือ, ตกปลา, ย่างปลาแคมป์ไฟ, ความหิว, เพลง MP3,
+//     ร้านจิปาถะ, ร้านแฟชั่น, ตลาดปลา, ภูเขา/ถ้ำ/เหมือง, ปีกขยับได้ และ NPC ใหม่
+// ============================================================================
+
+// --- 15.1 เพิ่มไอคอนให้อาวุธทุกชนิด (WEAPONS) และเพิ่มวัตถุดิบย่าง/อาหารไหม้ ---
+const WEAPON_ICONS = {
+  sword_iron: '🗡️',
+  sword_flame: '🔥',
+  staff_oak: '🪄',
+  staff_void: '🔮',
+  bow_hunter: '🏹',
+  bow_wind: '🌪️',
+  shield_knight: '🛡️',
+  shield_aegis: '⚜️',
+  tome_holy: '📖',
+  tome_seraph: '📜'
+};
+Object.values(WEAPONS).forEach(w => {
+  w.icon = WEAPON_ICONS[w.id] || '⚔️';
+});
+
+// เพิ่มไอคอนให้วัตถุดิบเดิมและวัตถุดิบใหม่ทุกชนิด
+Object.assign(FARM_MATERIALS, {
+  fishing_rod:  { id: 'fishing_rod',  name: 'คันเบ็ดไม้ไผ่ชั้นดี',   icon: '🎣', sellPrice: 40,  buyPrice: 120, desc: 'อุปกรณ์จำเป็นสำหรับการตกปลาตามแหล่งน้ำ' },
+  fishing_bait: { id: 'fishing_bait', name: 'เหยื่อตกปลาหอมพิเศษ',   icon: '🪱', sellPrice: 5,   buyPrice: 15,  desc: 'ใช้ 1 ชิ้นต่อการตกปลา 1 ครั้ง' },
+  raw_carp:     { id: 'raw_carp',     name: 'ปลาคาร์ปแม่น้ำสด',      icon: '🐟', sellPrice: 35,  buyPrice: 50,  desc: 'ปลาสดจากแหล่งน้ำ นำไปย่างที่แคมป์ไฟหรือขายที่ตลาดได้' },
+  raw_salmon:   { id: 'raw_salmon',   name: 'ปลาแซลมอนสีเงิน',       icon: '🐠', sellPrice: 65,  buyPrice: 90,  desc: 'ปลาเนื้อแน่นราคาดี ย่างไฟแล้วหอมอร่อยมาก' },
+  golden_fish:  { id: 'golden_fish',  name: 'ปลามังกรทองคำโบราณ',    icon: '🐡', sellPrice: 180, buyPrice: 250, desc: 'ปลาหายากในตำนาน ขายที่ตลาดได้ราคาสูงลิ่ว!' },
+  raw_meat:     { id: 'raw_meat',     name: 'เนื้อสัตว์ป่าสด',       icon: '🥩', sellPrice: 30,  buyPrice: 45,  desc: 'เนื้อสดชั้นดี สามารถนำไปย่างไฟที่แคมป์ไฟได้' },
+  grilled_fish: { id: 'grilled_fish', name: 'ปลาหอมย่างแคมป์ไฟ',     icon: '🍢', sellPrice: 55,  buyPrice: 75,  desc: 'กดกิน [H] เพื่อเพิ่มความหิว +45 และฟื้นฟู HP +60' },
+  grilled_meat: { id: 'grilled_meat', name: 'สเต็กเนื้อย่างแคมป์ไฟ', icon: '🍖', sellPrice: 65,  buyPrice: 85,  desc: 'กดกิน [H] เพื่อเพิ่มความหิว +60 และฟื้นฟู HP +85' },
+  baked_wheat:  { id: 'baked_wheat',  name: 'ขนมปังข้าวสาลีปิ้งไฟ',  icon: '🥖', sellPrice: 28,  buyPrice: 40,  desc: 'กดกิน [H] เพื่อเพิ่มความหิว +30 และฟื้นฟู Stamina +50' },
+  burnt_food:   { id: 'burnt_food',   name: 'อาหารไหม้เกรียม',       icon: '⚫', sellPrice: 2,   buyPrice: 5,   desc: 'ผลลัพธ์จากการย่างไฟพลาด! ขายทิ้งได้ราคาถูกมาก' }
+});
+
+// ตารางสูตรของที่ย่างได้บนแคมป์ไฟ (สามารถเพิ่มวัตถุดิบใหม่ๆ ในอนาคตได้ที่นี่เลย!)
+const CAMPFIRE_GRILL_RECIPES = [
+  { rawId: 'raw_carp',     outId: 'grilled_fish', outQty: 1, speed: 1.15, sweetWidth: 26 },
+  { rawId: 'raw_salmon',   outId: 'grilled_fish', outQty: 2, speed: 1.45, sweetWidth: 22 },
+  { rawId: 'golden_fish',  outId: 'grilled_fish', outQty: 3, speed: 1.85, sweetWidth: 18 },
+  { rawId: 'raw_meat',     outId: 'grilled_meat', outQty: 1, speed: 1.25, sweetWidth: 24 },
+  { rawId: 'golden_wheat', outId: 'baked_wheat',  outQty: 1, speed: 1.00, sweetWidth: 28 }
+];
+
+playerStats.hunger = playerStats.hunger ?? 100;
+playerStats.maxHunger = playerStats.maxHunger ?? 100;
+['fishing_rod', 'fishing_bait', 'raw_carp', 'raw_salmon', 'golden_fish', 'raw_meat', 'grilled_fish', 'grilled_meat', 'baked_wheat', 'burnt_food'].forEach(k => {
+  playerStats.inventory[k] = playerStats.inventory[k] ?? (k === 'grilled_fish' ? 2 : k === 'raw_meat' ? 1 : 0);
+});
+
+// อัปเดตหน้าต่างกระเป๋าและร้านตีเหล็กให้แสดงไอคอนเฉพาะของอาวุธแต่ละชิ้น
+const _origRenderInvModal = renderInventoryModal;
+renderInventoryModal = function () {
+  _origRenderInvModal();
+  const wepList = document.getElementById('inv-weapons-list');
+  if (!wepList) return;
+  const cls = CLASSES[currentConfig.classId];
+  wepList.innerHTML = '';
+  playerStats.ownedWeapons.forEach(wid => {
+    const w = WEAPONS[wid];
+    if (!w) return;
+    const equipped = currentConfig.weaponId === wid;
+    const canEquip = cls.allowedWeapon === 'any' || cls.allowedWeapon === w.type;
+    const row = document.createElement('div');
+    row.className = "bg-slate-900/90 border border-slate-700 rounded-xl p-2.5 flex items-center justify-between";
+    row.innerHTML = `
+      <div>
+        <div class="font-bold text-amber-200 text-xs">${w.icon || '⚔️'} ${w.name}</div>
+        <div class="text-[11px] text-slate-400">ATK +${w.atk} | MATK +${w.matk}</div>
+      </div>
+      <button class="eq-btn px-3 py-1 rounded-lg text-xs font-bold ${
+        equipped ? 'bg-emerald-500/30 text-emerald-200 border border-emerald-400' :
+        canEquip ? 'bg-sky-500 text-slate-950' : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+      }">${equipped ? 'สวมใส่แล้ว' : canEquip ? 'สวมใส่' : 'ติดคลาส'}</button>
+    `;
+    row.querySelector('.eq-btn').onclick = () => {
+      if (!canEquip || equipped) return;
+      currentConfig.weaponId = wid;
+      sound.sfxClick();
+      rebuildPreviewCharacter();
+      recalculateStats();
+      renderInventoryModal();
+      savePlayerToRTDB();
+      broadcastMyStateToRTDB();
+    };
+    wepList.appendChild(row);
+  });
+};
+
+// --- 15.2 เพลงหลักและเพลงต่อสู้จากไฟล์เสียงที่เตรียมไว้ ---
+const bgmTracks = {
+  main: [
+    './sound/BG/main1.mp3',
+    './sound/BG/main2.mp3',
+    './sound/BG/main3.mp3',
+    './sound/BG/main4.mp3'
+  ],
+  battle: [
+    './sound/BG/battle_bgm1.mp3',
+    './sound/BG/battle_bgm2.mp3'
+  ]
+};
+const bgmAudio = new Audio();
+bgmAudio.loop = false;
+bgmAudio.volume = 0.38;
+let bgmMode = 'main';
+let bgmTrackIndex = -1;
+let bgmModeCheckTimer = 0;
+
+function playBGM(mode = bgmMode, advance = false) {
+  if (!sound.enabled) return;
+  const playlist = bgmTracks[mode];
+  if (!playlist?.length) {
+    console.error(`No background music tracks configured for "${mode}".`);
+    return;
+  }
+  if (mode !== bgmMode) {
+    bgmMode = mode;
+    bgmTrackIndex = Math.floor(Math.random() * playlist.length);
+  } else if (advance || bgmTrackIndex < 0) {
+    bgmTrackIndex = (bgmTrackIndex + 1) % playlist.length;
+  }
+  const trackPath = playlist[bgmTrackIndex];
+  if (!advance && !bgmAudio.paused && bgmAudio.src.endsWith(trackPath.replace('./', ''))) return;
+  bgmAudio.src = trackPath;
+  bgmAudio.currentTime = 0;
+  bgmAudio.play().catch(error => {
+    console.warn(`Unable to play background music "${trackPath}":`, error);
+    if (error.name !== 'NotAllowedError') _origStartBGM();
+  });
+}
+
+bgmAudio.addEventListener('ended', () => playBGM(bgmMode, true));
+
+function updateCombatMusic(dt) {
+  bgmModeCheckTimer -= dt;
+  if (bgmModeCheckTimer > 0) return;
+  bgmModeCheckTimer = 0.8;
+  const pPos = playerChar3D.root.position;
+  const isTargetedCombat = targetMonster?.hp > 0 && pPos.distanceTo(targetMonster.mesh.position) <= 24;
+  const isActiveCombat = playerChar3D.attackTimer > 0 ||
+    classCombatState.fighterSkill ||
+    classCombatState.fighterUltimate ||
+    classCombatState.swordUltimate;
+  const nextMode = isTargetedCombat || isActiveCombat ? 'battle' : 'main';
+  if (nextMode !== bgmMode) playBGM(nextMode);
+}
+
+const _origStartBGM = sound.startBGM.bind(sound);
+sound.startBGM = function () {
+  if (this.enabled) playBGM('main');
+};
+
+const audioToggleBtn = document.getElementById('btn-audio-toggle');
+if (audioToggleBtn) {
+  audioToggleBtn.onclick = () => {
+    sound.enabled = !sound.enabled;
+    document.getElementById('audio-icon').textContent = sound.enabled ? '🔊' : '🔇';
+    document.getElementById('audio-label').textContent = sound.enabled ? 'เสียง' : 'ปิดเสียง';
+    if (sound.enabled) {
+      sound.sfxClick();
+      playBGM(bgmMode);
+    } else {
+      bgmAudio.pause();
+    }
+  };
+}
+
+// --- 15.3 อนิเมชั่นปีกแฟชั่นขยับได้ (Wing Flapping Animation) ---
+const _prevUpdateAnim = ArticulatedCharacter3D.prototype.updateAnimation;
+ArticulatedCharacter3D.prototype.updateAnimation = function (dt, speedRatio = 0, isJumping = false, verticalVelocity = 0, turnDelta = 0, isInWater = false) {
+  _prevUpdateAnim.call(this, dt, speedRatio, isJumping, verticalVelocity, turnDelta, isInWater);
+  if (this.joints.wingL && this.joints.wingR) {
+    const frameTime = THREE.MathUtils.clamp(dt, 0, 0.05);
+    const state = this.animState || 'idle';
+    const isResting = state === 'sit' || state === 'sleep';
+    const isDead = state === 'death';
+    const isJumpState = isJumping || state === 'jump';
+    const isFalling = !isJumpState && verticalVelocity < -1.5;
+    const activityTarget = isDead || state === 'sleep'
+      ? 0
+      : isResting
+        ? 0.14
+        : isJumpState || isFalling
+          ? 1
+          : THREE.MathUtils.clamp(speedRatio * 0.62, 0.08, 1);
+    this.wingActivity = THREE.MathUtils.damp(this.wingActivity || 0, activityTarget, 5.5, frameTime);
+    this.wingFold = THREE.MathUtils.damp(
+      this.wingFold || 0,
+      isDead ? 1 : isResting ? 0.62 : 0,
+      4.5,
+      frameTime
+    );
+    this.wingMotionSpeed = THREE.MathUtils.damp(
+      this.wingMotionSpeed || 0,
+      THREE.MathUtils.clamp(speedRatio, 0, 2.4) * (isDead || state === 'sleep' ? 0 : 1),
+      6,
+      frameTime
+    );
+    this.wingJumpFactor = THREE.MathUtils.damp(
+      this.wingJumpFactor || 0,
+      isJumpState || isFalling ? 1 : 0,
+      8,
+      frameTime
+    );
+
+    const speed = this.wingMotionSpeed;
+    const jumpFactor = this.wingJumpFactor;
+    const activity = this.wingActivity;
+    const fold = this.wingFold;
+    this.wingPhase = (this.wingPhase || 0) + frameTime * (1.8 + Math.min(1.5, speed) * 1.2 + jumpFactor * 1.5) * activity;
+    const phase = this.wingPhase;
+    const flapAmplitude = 0.025 + activity * (0.13 + Math.min(1.4, speed) * 0.09 + jumpFactor * 0.13);
+    const flap = Math.sin(phase) * flapAmplitude;
+    const bank = Math.cos(phase) * (0.008 + activity * (0.025 + speed * 0.014 + jumpFactor * 0.025));
+    const shoulderSway = Math.sin(phase - 0.25) * activity * (0.025 + speed * 0.018);
+    const foldedAngle = fold * 0.48;
+
+    this.joints.wingL.rotation.set(-0.035 + shoulderSway, 0.16 + foldedAngle + flap, -0.035 + bank + fold * 0.08);
+    this.joints.wingR.rotation.set(-0.035 + shoulderSway, -0.16 - foldedAngle - flap, 0.035 - bank - fold * 0.08);
+  }
+};
+
+// --- 15.4 อัปเดต HUD ค่าความหิว + เพิ่มปุ่มตกปลา/ย่างปลา/กินอาหาร บน Hotbar ---
+const _origUpdateHUD = updateHUD;
+updateHUD = function () {
+  _origUpdateHUD();
+  const hBar = document.getElementById('hud-hunger-bar');
+  const hTxt = document.getElementById('hud-hunger-text');
+  if (hBar && hTxt) {
+    const hVal = Math.max(0, Math.min(playerStats.maxHunger, playerStats.hunger || 0));
+    hTxt.textContent = `${Math.floor(hVal)} / ${playerStats.maxHunger}`;
+    hBar.style.width = `${(hVal / playerStats.maxHunger) * 100}%`;
+  }
+  const fishCountEl = document.getElementById('count-grilled-fish');
+  if (fishCountEl) {
+    fishCountEl.textContent = playerStats.inventory.grilled_fish || 0;
+  }
+};
+
+(function injectNewHotbarButtons() {
+  const gatherBtn = document.getElementById('btn-gather-node');
+  if (!gatherBtn || document.getElementById('btn-fish-action')) return;
+
+  const fishBtn = document.createElement('button');
+  fishBtn.id = 'btn-fish-action';
+  fishBtn.className = 'relative w-14 h-14 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 border border-sky-400/50 flex flex-col items-center justify-center';
+  fishBtn.innerHTML = `
+    <span class="absolute top-0.5 left-1.5 text-[10px] font-bold text-sky-300">G</span>
+    <span class="text-lg">🎣</span>
+    <span class="text-[9px] text-sky-200 font-semibold">ตกปลา</span>
+  `;
+  fishBtn.onclick = () => startFishingAction();
+
+  const grillBtn = document.createElement('button');
+  grillBtn.id = 'btn-grill-action';
+  grillBtn.className = 'relative w-14 h-14 rounded-xl bg-orange-500/20 hover:bg-orange-500/30 border border-orange-400/50 flex flex-col items-center justify-center';
+  grillBtn.innerHTML = `
+    <span class="absolute top-0.5 left-1.5 text-[10px] font-bold text-orange-300">C</span>
+    <span class="text-lg">🔥</span>
+    <span class="text-[9px] text-orange-200 font-semibold">ย่างปลา</span>
+  `;
+  grillBtn.onclick = () => grillFishAtCampfire();
+
+  const eatBtn = document.createElement('button');
+  eatBtn.id = 'btn-eat-fish';
+  eatBtn.className = 'relative w-14 h-14 rounded-xl bg-lime-500/20 hover:bg-lime-500/30 border border-lime-400/50 flex flex-col items-center justify-center';
+  eatBtn.innerHTML = `
+    <span class="absolute top-0.5 left-1.5 text-[10px] font-bold text-lime-300">H</span>
+    <span class="text-lg">🍢</span>
+    <span class="text-[9px] text-lime-200 font-semibold">กิน(<span id="count-grilled-fish">2</span>)</span>
+  `;
+  eatBtn.onclick = () => eatGrilledFish();
+
+  gatherBtn.parentNode.insertBefore(fishBtn, gatherBtn.nextSibling);
+  gatherBtn.parentNode.insertBefore(grillBtn, fishBtn.nextSibling);
+  gatherBtn.parentNode.insertBefore(eatBtn, grillBtn.nextSibling);
+})();
+
+// เปลี่ยนปุ่มแต่งตัวละครใน HUD ให้เปิดร้านแฟชั่นได้ด้วย
+document.getElementById('btn-open-customize').onclick = () => {
+  sound.sfxClick();
+  releaseMouseForUI();
+  renderFashionShopModal();
+  document.getElementById('modal-fashion').classList.remove('hidden');
+};
+
+// --- 15.5 ระบบมินิเกมตกปลา & ระบบเลือกวัตถุดิบย่างแคมป์ไฟพร้อมมินิเกมคุมไฟ ---
+let isFishingActive = false;
+let fishingBobberMesh = null;
+let fishMinigameState = {
+  active: false,
+  needlePos: 10,
+  needleDir: 1,
+  needleSpeed: 68, // ความเร็วเข็ม (% ต่อวินาที)
+  zoneStart: 35,
+  zoneWidth: 24,
+  zoneDir: 1,
+  hits: 0,
+  misses: 0
+};
+
+function startFishingAction() {
+  if (gameState !== 'world') return;
+  if ((playerStats.inventory.fishing_rod || 0) <= 0) {
+    addLog("🎣 คุณยังไม่มี <b>คันเบ็ดตกปลา</b>! ไปหาซื้อได้ที่ <b>ร้านค้าจิปาถะ (พ่อค้ามาร์โค)</b> ก่อนนะ", "text-amber-300 font-bold");
+    return;
+  }
+  if ((playerStats.inventory.fishing_bait || 0) <= 0) {
+    addLog("🪱 คุณไม่มี <b>เหยื่อตกปลา</b>! ไปซื้อเหยื่อตกปลาที่ <b>ร้านค้าจิปาถะ</b> ก่อนนะ", "text-amber-300 font-bold");
+    return;
+  }
+
+  const pPos = playerChar3D.root.position;
+  let nearWater = playerPhysics.isInWater || pPos.y <= WATER_LEVEL + 0.85;
+  let waterSpot = pPos.clone();
+  for (let ang = 0; ang < Math.PI * 2; ang += Math.PI / 4) {
+    const tx = pPos.x + Math.cos(ang) * 5.5;
+    const tz = pPos.z + Math.sin(ang) * 5.5;
+    if (worldNoise.getHeight(tx, tz) <= WATER_LEVEL + 0.35) {
+      nearWater = true;
+      waterSpot.set(tx, WATER_LEVEL + 0.05, tz);
+      playerPhysics.targetRotY = Math.atan2(tx - pPos.x, tz - pPos.z);
+      break;
+    }
+  }
+
+  if (!nearWater) {
+    addLog("🌊 กรุณาเดินไปริมแหล่งน้ำหรือชายฝั่งเพื่อเหวี่ยงเบ็ดตกปลา!", "text-sky-300");
+    return;
+  }
+
+  // หักเหยื่อ 1 ชิ้น และเปิดมินิเกมตกปลา
+  playerStats.inventory.fishing_bait--;
+  isFishingActive = true;
+  playerChar3D.animState = 'harvest';
+  sound.sfxSplash();
+  releaseMouseForUI();
+
+  if (!fishingBobberMesh) {
+    fishingBobberMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.18, 12, 12),
+      new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0xfef08a, emissiveIntensity: 0.5 })
+    );
+    worldGroup.add(fishingBobberMesh);
+  }
+  fishingBobberMesh.position.copy(waterSpot);
+  fishingBobberMesh.visible = true;
+  spawnWaterSplashRing(waterSpot, 0x38bdf8, 1.6);
+
+  // ตั้งค่าเริ่มต้นมินิเกมตกปลา
+  fishMinigameState = {
+    active: true,
+    needlePos: 15,
+    needleDir: 1,
+    needleSpeed: 72,
+    zoneStart: 28 + Math.random() * 35,
+    zoneWidth: 24,
+    zoneDir: Math.random() < 0.5 ? 1 : -1,
+    hits: 0,
+    misses: 0
+  };
+  document.getElementById('fish-catch-score').textContent = `0 / 3`;
+  document.getElementById('fish-minigame-msg').textContent = `กดดึงเบ็ดตอนเข็มสีเหลืองทับตัวปลา 🐟! (เหยื่อเหลือ ${playerStats.inventory.fishing_bait})`;
+  document.getElementById('modal-fishing-minigame').classList.remove('hidden');
+  updateHUD();
+}
+
+function handleFishingStrike() {
+  if (!fishMinigameState.active) return;
+  const n = fishMinigameState.needlePos;
+  const zStart = fishMinigameState.zoneStart;
+  const zEnd = zStart + fishMinigameState.zoneWidth;
+
+  if (n >= zStart - 2 && n <= zEnd + 2) {
+    fishMinigameState.hits++;
+    sound.sfxCoin();
+    document.getElementById('fish-catch-score').textContent = `${fishMinigameState.hits} / 3`;
+    document.getElementById('fish-minigame-msg').textContent = `✨ ดึงเข้าเป้า! อีก ${3 - fishMinigameState.hits} ครั้ง!`;
+    // สุ่มย้ายตำแหน่งปลาและเพิ่มความท้าทายขึ้นเล็กน้อย
+    fishMinigameState.zoneStart = 12 + Math.random() * 60;
+    fishMinigameState.needleSpeed += 12;
+
+    if (fishMinigameState.hits >= 3) {
+      closeFishingMinigame();
+      const roll = Math.random();
+      const caughtId = roll > 0.85 ? 'golden_fish' : roll > 0.42 ? 'raw_salmon' : 'raw_carp';
+      const fInfo = FARM_MATERIALS[caughtId];
+      playerStats.inventory[caughtId] = (playerStats.inventory[caughtId] || 0) + 1;
+      sound.sfxLevelUp();
+      showFloatingDamage(playerChar3D.root.position, `🎣 ได้รับ ${fInfo.icon} ${fInfo.name}!`, '#38bdf8');
+      addLog(`🎉 ตกปลาสำเร็จ! ได้รับ <b>${fInfo.icon} ${fInfo.name} x1</b>`, "text-emerald-300 font-bold");
+      gainExpAndGold(35, 15);
+    }
+  } else {
+    fishMinigameState.misses++;
+    sound.sfxHit();
+    document.getElementById('fish-minigame-msg').textContent = `⚠️ ดึงพลาดจังหวะ! (${fishMinigameState.misses}/3)`;
+    if (fishMinigameState.misses >= 3) {
+      closeFishingMinigame();
+      addLog(`🐟 ปลาสะบัดหลุดเบ็ดหนีไปแล้ว! ลองตั้งสมาธิเหวี่ยงเบ็ดใหม่อีกครั้งนะ`, "text-rose-400 font-bold");
+    }
+  }
+}
+
+function closeFishingMinigame() {
+  fishMinigameState.active = false;
+  isFishingActive = false;
+  if (fishingBobberMesh) fishingBobberMesh.visible = false;
+  playerChar3D.animState = 'idle';
+  document.getElementById('modal-fishing-minigame').classList.add('hidden');
+}
+
+document.getElementById('btn-fish-strike').onclick = handleFishingStrike;
+document.getElementById('btn-fish-cancel').onclick = closeFishingMinigame;
+
+// --- ระบบเลือกของย่างที่แคมป์ไฟ & มินิเกมคุมไฟ (พลาดได้อาหารไหม้!) ---
+let grillMinigameState = {
+  active: false,
+  recipe: null,
+  needlePos: 0,
+  needleDir: 1,
+  sweetStart: 35,
+  sweetWidth: 24
+};
+
+function grillFishAtCampfire() {
+  if (gameState !== 'world') return;
+  const pPos = playerChar3D.root.position;
+  let nearFire = false;
+  for (let i = 0; i < animatedCampfires.length; i++) {
+    const cf = animatedCampfires[i];
+    const fPos = new THREE.Vector3();
+    cf.group.getWorldPosition(fPos);
+    if (pPos.distanceTo(fPos) <= 4.8) {
+      nearFire = true;
+      break;
+    }
+  }
+
+  if (!nearFire) {
+    addLog("🔥 ต้องเดินไปใกล้ๆ <b>กองไฟแคมป์ไฟ (Campfire)</b> ในเมืองหรือในหมู่บ้านเพื่อทำอาหารปิ้งย่าง!", "text-orange-300");
+    return;
+  }
+
+  sound.sfxClick();
+  releaseMouseForUI();
+  renderCampfireSelectionList();
+  document.getElementById('campfire-minigame-section').classList.add('hidden');
+  document.getElementById('modal-campfire-cook').classList.remove('hidden');
+}
+
+function renderCampfireSelectionList() {
+  const listEl = document.getElementById('campfire-select-section');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+
+  CAMPFIRE_GRILL_RECIPES.forEach(rc => {
+    const rawInfo = FARM_MATERIALS[rc.rawId];
+    const outInfo = FARM_MATERIALS[rc.outId];
+    const qty = playerStats.inventory[rc.rawId] || 0;
+
+    const row = document.createElement('div');
+    row.className = "bg-slate-900/90 border border-slate-700 rounded-xl p-2.5 flex items-center justify-between gap-2";
+    row.innerHTML = `
+      <div>
+        <div class="font-bold text-amber-200 text-xs">
+          ${rawInfo.icon} ${rawInfo.name} <span class="text-emerald-300">(มี x${qty})</span>
+          ➔ ${outInfo.icon} ${outInfo.name} x${rc.outQty}
+        </div>
+        <div class="text-[11px] text-slate-400">${outInfo.desc}</div>
+      </div>
+      <button class="start-grill-btn px-3 py-1.5 rounded-lg text-xs font-bold shrink-0 ${
+        qty > 0 ? 'bg-orange-500 hover:bg-orange-400 text-slate-950' : 'bg-slate-800 text-slate-600 cursor-not-allowed'
+      }">🔥 เลือกย่าง</button>
+    `;
+    row.querySelector('.start-grill-btn').onclick = () => {
+      if (qty <= 0) {
+        addLog(`⚠️ คุณไม่มี <b>${rawInfo.icon} ${rawInfo.name}</b> ในกระเป๋า!`, "text-amber-300");
+        return;
+      }
+      startCampfireGrillMinigame(rc);
+    };
+    listEl.appendChild(row);
+  });
+}
+
+function startCampfireGrillMinigame(recipe) {
+  const rawInfo = FARM_MATERIALS[recipe.rawId];
+  playerStats.inventory[recipe.rawId]--;
+  playerChar3D.animState = 'sit';
+  sound.sfxClick();
+
+  grillMinigameState = {
+    active: true,
+    recipe,
+    needlePos: 5,
+    needleDir: 1,
+    sweetStart: 35,
+    sweetWidth: recipe.sweetWidth || 24
+  };
+
+  const sweetEl = document.getElementById('grill-sweet-spot');
+  if (sweetEl) sweetEl.style.width = `${grillMinigameState.sweetWidth}%`;
+  document.getElementById('grill-active-title').innerHTML = `🔥 กำลังย่าง <b>${rawInfo.icon} ${rawInfo.name}</b>... กดยกขึ้นเมื่อเข็มอยู่ในโซนสีทอง!`;
+  document.getElementById('campfire-minigame-section').classList.remove('hidden');
+  renderCampfireSelectionList();
+  updateHUD();
+}
+
+function finishCampfireGrillMinigame() {
+  if (!grillMinigameState.active) return;
+  grillMinigameState.active = false;
+  const rc = grillMinigameState.recipe;
+  const n = grillMinigameState.needlePos;
+  const sStart = grillMinigameState.sweetStart;
+  const sEnd = sStart + grillMinigameState.sweetWidth;
+  const pPos = playerChar3D.root.position;
+
+  document.getElementById('campfire-minigame-section').classList.add('hidden');
+
+  if (n >= sStart && n <= sEnd) {
+    // ย่างสำเร็จ!
+    const outInfo = FARM_MATERIALS[rc.outId];
+    playerStats.inventory[rc.outId] = (playerStats.inventory[rc.outId] || 0) + rc.outQty;
+    sound.sfxLevelUp();
+    showFloatingDamage(pPos, `✨ สุกหอม! +${rc.outQty} ${outInfo.icon} ${outInfo.name}`, '#fb923c');
+    addLog(`🔥 ย่างสำเร็จอย่างสมบูรณ์แบบ! ได้รับ <b>${outInfo.icon} ${outInfo.name} x${rc.outQty}</b>`, "text-emerald-300 font-bold");
+  } else {
+    // ย่างพลาด ได้อาหารไหม้!
+    playerStats.inventory.burnt_food = (playerStats.inventory.burnt_food || 0) + 1;
+    sound.sfxHit();
+    showFloatingDamage(pPos, `💨 ไฟแรงเกิน! ได้ ⚫ อาหารไหม้เกรียม`, '#94a3b8');
+    addLog(`💨 กะจังหวะไฟพลาด! วัตถุดิบไหม้เป็น <b>⚫ อาหารไหม้เกรียม x1</b>`, "text-rose-400 font-bold");
+  }
+
+  renderCampfireSelectionList();
+  updateHUD();
+  savePlayerToRTDB();
+}
+
+document.getElementById('btn-grill-stop').onclick = finishCampfireGrillMinigame;
+document.getElementById('btn-close-campfire').onclick = () => {
+  grillMinigameState.active = false;
+  document.getElementById('modal-campfire-cook').classList.add('hidden');
+};
+
+// กินอาหารที่ย่างสุกแล้ว (รองรับทั้งเนื้อย่าง ปลาย่าง และขนมปังปิ้ง)
+function eatGrilledFish() {
+  let foodId = null;
+  let hungerGain = 45, hpGain = 60, stamGain = 35;
+
+  if ((playerStats.inventory.grilled_meat || 0) > 0) {
+    foodId = 'grilled_meat'; hungerGain = 60; hpGain = 85; stamGain = 50;
+  } else if ((playerStats.inventory.grilled_fish || 0) > 0) {
+    foodId = 'grilled_fish'; hungerGain = 45; hpGain = 60; stamGain = 40;
+  } else if ((playerStats.inventory.baked_wheat || 0) > 0) {
+    foodId = 'baked_wheat'; hungerGain = 30; hpGain = 35; stamGain = 55;
+  }
+
+  if (!foodId) {
+    addLog("🍢 ไม่มีอาหารย่างพร้อมทานในกระเป๋า! นำวัตถุดิบไปย่างที่แคมป์ไฟ [C] ก่อนนะ", "text-amber-300");
+    return;
+  }
+
+  const fInfo = FARM_MATERIALS[foodId];
+  playerStats.inventory[foodId]--;
+  playerStats.hunger = Math.min(playerStats.maxHunger, (playerStats.hunger || 0) + hungerGain);
+  playerStats.hp = Math.min(playerStats.maxHp, playerStats.hp + hpGain);
+  playerStats.stamina = Math.min(playerStats.maxStamina, playerStats.stamina + stamGain);
+  sound.sfxLevelUp();
+  showFloatingDamage(playerChar3D.root.position, `+${hungerGain} 🍖 ความหิว | +${hpGain} HP`, '#a3e635');
+  addLog(`${fInfo.icon} กิน <b>${fInfo.name}</b>! ฟื้นฟูความหิว +${hungerGain} และ HP +${hpGain}`, "text-lime-300 font-bold");
+  updateHUD();
+  savePlayerToRTDB();
+}
+
+// --- 15.6 ระบบร้านค้าใหม่ทั้ง 3 ร้าน (ร้านจิปาถะ, ตลาดซื้อ/ขายปลา, ร้านแฟชั่น) ---
+function renderGeneralStoreModal() {
+  const grid = document.getElementById('general-items-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+  const items = [
+    {
+      title: '🎣 คันเบ็ดไม้ไผ่ชั้นดี (Fishing Rod)',
+      desc: `อุปกรณ์สำหรับตกปลาตามแม่น้ำและทะเล (มีแล้ว: ${playerStats.inventory.fishing_rod || 0})`,
+      price: 120,
+      buy: () => { playerStats.inventory.fishing_rod = (playerStats.inventory.fishing_rod || 0) + 1; }
+    },
+    {
+      title: '🪱 เหยื่อตกปลาหอมพิเศษ x5 ชิ้น',
+      desc: `เหยื่อล่อปลาชั้นดี ใช้ตกปลาได้ 5 ครั้ง (มีอยู่: ${playerStats.inventory.fishing_bait || 0})`,
+      price: 50,
+      buy: () => { playerStats.inventory.fishing_bait = (playerStats.inventory.fishing_bait || 0) + 5; }
+    },
+    {
+      title: '🍢 เสบียงปลาย่างพร้อมทาน x2',
+      desc: `เติมค่าความหิว +45 ทันทีเมื่อกด [H] (มีอยู่: ${playerStats.inventory.grilled_fish || 0})`,
+      price: 110,
+      buy: () => { playerStats.inventory.grilled_fish = (playerStats.inventory.grilled_fish || 0) + 2; }
+    },
+    {
+      title: '🧪 ยาฟื้นฟูฉุกเฉิน (HP Pot x3 + MP Pot x3)',
+      desc: 'ชุดยาโพชั่นราคาประหยัดสำหรับนักเดินทาง',
+      price: 80,
+      buy: () => { playerStats.hpPots += 3; playerStats.mpPots += 3; }
+    }
+  ];
+
+  items.forEach(it => {
+    const card = document.createElement('div');
+    card.className = "bg-slate-900/90 border border-slate-700 rounded-xl p-3 flex items-center justify-between gap-2";
+    card.innerHTML = `
+      <div>
+        <div class="font-bold text-emerald-300 text-sm">${it.title}</div>
+        <div class="text-xs text-slate-300">${it.desc}</div>
+      </div>
+      <button class="gen-buy-btn bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-3 py-1.5 rounded-lg text-xs shrink-0">ซื้อ ${it.price} G</button>
+    `;
+    card.querySelector('.gen-buy-btn').onclick = () => {
+      if (playerStats.gold < it.price) {
+        addLog("❌ เงิน Gold ไม่พอ!", "text-rose-400");
+        return;
+      }
+      playerStats.gold -= it.price;
+      it.buy();
+      sound.sfxCoin();
+      updateHUD();
+      renderGeneralStoreModal();
+      savePlayerToRTDB();
+    };
+    grid.appendChild(card);
+  });
+}
+
+function renderFishMarketModal() {
+  const grid = document.getElementById('market-items-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+  const fishIds = ['raw_carp', 'raw_salmon', 'golden_fish', 'grilled_fish'];
+  fishIds.forEach(fid => {
+    const info = FARM_MATERIALS[fid];
+    const qty = playerStats.inventory[fid] || 0;
+    const card = document.createElement('div');
+    card.className = "bg-slate-900/90 border border-slate-700 rounded-xl p-3 flex flex-col justify-between gap-2";
+    card.innerHTML = `
+      <div>
+        <div class="font-bold text-sky-300 text-sm">${info.icon} ${info.name} <span class="text-amber-300">(มี x${qty})</span></div>
+        <div class="text-xs text-slate-400">${info.desc}</div>
+      </div>
+      <div class="flex gap-2 justify-end">
+        <button class="mkt-buy px-2.5 py-1 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs">ซื้อ (${info.buyPrice} G)</button>
+        <button class="mkt-sell px-2.5 py-1 rounded-lg ${qty > 0 ? 'bg-amber-500 hover:bg-amber-400 text-slate-950' : 'bg-slate-800 text-slate-600 cursor-not-allowed'} font-bold text-xs">ขาย (+${info.sellPrice} G)</button>
+      </div>
+    `;
+    card.querySelector('.mkt-buy').onclick = () => {
+      if (playerStats.gold < info.buyPrice) { addLog("❌ เงิน Gold ไม่พอซื้อ!", "text-rose-400"); return; }
+      playerStats.gold -= info.buyPrice;
+      playerStats.inventory[fid] = (playerStats.inventory[fid] || 0) + 1;
+      sound.sfxCoin();
+      updateHUD();
+      renderFishMarketModal();
+      savePlayerToRTDB();
+    };
+    card.querySelector('.mkt-sell').onclick = () => {
+      if (qty <= 0) return;
+      playerStats.inventory[fid]--;
+      playerStats.gold += info.sellPrice;
+      sound.sfxCoin();
+      addLog(`⚖️ ขาย <b>${info.name}</b> ได้รับ +${info.sellPrice} G`, "text-amber-300");
+      updateHUD();
+      renderFishMarketModal();
+      savePlayerToRTDB();
+    };
+    grid.appendChild(card);
+  });
+}
+
+function setFashionItem(itemId) {
+  const result = equipOwnedFashion(playerStats, currentConfig, itemId);
+  if (!result.ok) {
+    addLog('❌ แฟชั่นนี้ไม่ได้อยู่ในกระเป๋าของคุณ', 'text-rose-400');
+    return result;
+  }
+  if (result.replaced?.length) {
+    addLog(`ℹ️ เปลี่ยนสล็อต ${result.replaced.map(item => item.slot).join(', ')} เพื่อไม่ให้แฟชั่นทับตำแหน่งกัน`, 'text-sky-300');
+  }
+  return result;
+}
+
+function renderFashionShopModal(wardrobeOnly = false) {
+  renderFashionShopUI(playerStats, currentConfig, {
+    wardrobeOnly,
+    sound,
+    addLog,
+    equipFashion: setFashionItem,
+    rebuildPreviewCharacter,
+    updateHUD,
+    savePlayerToRTDB,
+    broadcastMyStateToRTDB
+  });
+  const title = document.querySelector('#modal-fashion h3');
+  if (title) title.textContent = wardrobeOnly
+    ? '👗 ตู้เสื้อผ้าแฟชั่น (สวมใส่ของที่เป็นเจ้าของ)'
+    : '👗 ห้องเสื้อและร้านค้าแฟชั่น (ดีไซเนอร์วิเวียน)';
+  const subtitle = document.querySelector('#modal-fashion p');
+  if (subtitle) subtitle.textContent = wardrobeOnly
+    ? 'เลือกสวมใส่หรือถอดแฟชั่นที่ซื้อแล้ว ช่องที่ทับกันจะเปลี่ยนเป็นชิ้นใหม่'
+    : 'ซื้อแฟชั่นแล้วเก็บไว้ในกระเป๋า จากนั้นเปลี่ยนชุดได้ทุกเมื่อที่ตู้เสื้อผ้า';
+  const wardrobeButton = document.getElementById('btn-open-fashion-wardrobe');
+  if (wardrobeButton) wardrobeButton.classList.toggle('hidden', wardrobeOnly);
+  document.getElementById('modal-fashion').classList.remove('hidden');
+}
+
+document.getElementById('btn-close-general').onclick = () => document.getElementById('modal-general').classList.add('hidden');
+document.getElementById('btn-close-market').onclick = () => document.getElementById('modal-market').classList.add('hidden');
+document.getElementById('btn-close-fashion').onclick = () => document.getElementById('modal-fashion').classList.add('hidden');
+document.getElementById('btn-open-fashion-wardrobe').onclick = () => renderFashionShopModal(true);
+
+// --- 15.7 ภูเขาหินยักษ์พร้อมโถงถ้ำและเหมืองใต้พิภพขนาดใหญ่ที่เดินสำรวจภายในได้จริง ---
+function buildCaveAndMineInChunk(cx, cz, chunkGroup) {
+  const wx = cx * CHUNK_SIZE;
+  const wz = cz * CHUNK_SIZE;
+  const wy = worldNoise.getHeight(wx, wz);
+  if (wy < WATER_LEVEL + 1.2) return;
+
+  const isMine = (Math.abs(cx + cz) % 2 === 0);
+  const structGroup = new THREE.Group();
+  structGroup.position.set(0, wy, 0);
+
+  // ปรับวัสดุหินในถ้ำให้มี Emissive อ่อนๆ รับกับแสงคริสตัล แก้ปัญหาถ้ำมืดตึบ 100%!
+  const rockMat = createAnimeMaterial({ color: isMine ? 0x64748b : 0x475569, roughness: 0.75 });
+  const innerWallMat = new THREE.MeshStandardMaterial({
+    color: 0x475569,
+    emissive: isMine ? 0x451a03 : 0x0f172a,
+    emissiveIntensity: 0.55,
+    roughness: 0.72,
+    side: THREE.DoubleSide
+  });
+  const floorMat = new THREE.MeshStandardMaterial({
+    color: 0x334155,
+    emissive: isMine ? 0x3b1d06 : 0x0c192c,
+    emissiveIntensity: 0.50,
+    roughness: 0.78
+  });
+  const woodMat = createAnimeMaterial({ color: 0x92400e, roughness: 0.75 });
+
+  const caveFloor = new THREE.Mesh(new THREE.BoxGeometry(22, 0.25, 26), floorMat);
+  caveFloor.position.set(0, 0.08, -6);
+  caveFloor.receiveShadow = true;
+  structGroup.add(caveFloor);
+
+  const wallBlocks = [
+    { lx: -11.5, lz: -6, w: 6.5, h: 18, d: 26 },
+    { lx: 11.5,  lz: -6, w: 6.5, h: 18, d: 26 },
+    { lx: 0,     lz: -19.5, w: 28, h: 19, d: 6.5 },
+    { lx: -8.2,  lz: 6.5, w: 7.5, h: 14, d: 4.5 },
+    { lx: 8.2,   lz: 6.5, w: 7.5, h: 14, d: 4.5 }
+  ];
+
+  wallBlocks.forEach(b => {
+    const wallMesh = new THREE.Mesh(new THREE.BoxGeometry(b.w, b.h, b.d), innerWallMat);
+    wallMesh.position.set(b.lx, b.h / 2, b.lz);
+    wallMesh.castShadow = true;
+    wallMesh.receiveShadow = true;
+    structGroup.add(wallMesh);
+    registerBoxCollider(worldColliders, wx + b.lx, wz + b.lz, b.w, b.d, wy + b.h, false);
+  });
+
+  const ceilingSlab = new THREE.Mesh(new THREE.BoxGeometry(26, 4.0, 28), rockMat);
+  ceilingSlab.position.set(0, 10.5, -6);
+  structGroup.add(ceilingSlab);
+
+  const mainPeak = new THREE.Mesh(new THREE.ConeGeometry(19.5, 22.0, 9), rockMat);
+  mainPeak.position.set(0, 21.0, -7);
+  const subPeakL = new THREE.Mesh(new THREE.ConeGeometry(13.5, 17.0, 7), rockMat);
+  subPeakL.position.set(-10, 16.5, -4);
+  const subPeakR = new THREE.Mesh(new THREE.ConeGeometry(14.0, 18.5, 8), rockMat);
+  subPeakR.position.set(10, 17.5, -8);
+  structGroup.add(mainPeak, subPeakL, subPeakR);
+
+  [-4.4, 4.4].forEach(px => {
+    const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.9, 7.5, 0.9), woodMat);
+    pillar.position.set(px, 3.75, 7.2);
+    structGroup.add(pillar);
+  });
+  const archBeam = new THREE.Mesh(new THREE.BoxGeometry(10.2, 0.9, 1.1), woodMat);
+  archBeam.position.set(0, 7.5, 7.2);
+  structGroup.add(archBeam);
+
+  // หินคริสตัลเรืองแสงพร้อมระบบกระจายแสง (Light Dispersion) ส่องสว่างทั่วพื้นและผนังถ้ำ!
+  const crystalColor = isMine ? 0xfbbf24 : 0x38bdf8;
+  const crystalPositions = [
+    [-6.5, -4], [6.5, -4], [-7.0, -12], [7.0, -12], [0, -15.5]
+  ];
+  crystalPositions.forEach(([cxPos, czPos], idx) => {
+    const crysHolder = new THREE.Group();
+    crysHolder.position.set(cxPos, 0, czPos);
+
+    const crys = new THREE.Mesh(
+      new THREE.OctahedronGeometry(1.25, 0),
+      new THREE.MeshStandardMaterial({
+        color: crystalColor,
+        emissive: crystalColor,
+        emissiveIntensity: 0.85,
+        roughness: 0.25
+      })
+    );
+    crys.scale.set(0.8, 2.1, 0.8);
+    crys.position.y = 1.5;
+    crysHolder.add(crys);
+
+    // กระจายแสงจริงรอบคริสตัลแต่ละก้อน
+    attachLightDispersion(crysHolder, crystalColor, 3.8, 30);
+    structGroup.add(crysHolder);
+
+    const stalactite = new THREE.Mesh(new THREE.ConeGeometry(0.9, 3.2, 6), innerWallMat);
+    stalactite.rotation.x = Math.PI;
+    stalactite.position.set(cxPos * 0.7, 7.2, czPos);
+    structGroup.add(stalactite);
+
+    spawnFarmingNodeAt(wx + cxPos * 0.65, wz + czPos, idx % 2 === 0 ? 'mithril_ore' : 'moon_herb');
+  });
+
+  // โคมไฟเพดานโถงถ้ำส่องสว่างตรงกลาง
+  const centerDomeLight = new THREE.PointLight(0xfff7ed, 4.5, 45, 0.5);
+  centerDomeLight.position.set(0, 7.5, -8);
+  structGroup.add(centerDomeLight);
+
+  spawnBanditNPCAt(wx - 3.5, wz - 10);
+  spawnBanditNPCAt(wx + 3.5, wz - 13);
+
+  const labelAnchor = new THREE.Object3D();
+  labelAnchor.position.set(wx, wy + 9.2, wz + 7.5);
+  worldGroup.add(labelAnchor);
+  registerFloatingLabel(
+    labelAnchor,
+    `<div class="px-3 py-1 rounded-full bg-slate-950/95 border border-amber-400 text-[11px] text-amber-300 font-extrabold shadow-xl">⛰️ ${isMine ? 'มหาเหมืองแร่ใต้พิภพ (เดินเข้าสำรวจได้)' : 'โถงถ้ำคริสตัลยักษ์ (เดินเข้าสำรวจได้)'}</div>`,
+    0
+  );
+
+  chunkGroup.add(structGroup);
+}
+// เสก NPC โจรป่า (Bandits - มอนสเตอร์รูปร่างมนุษย์ถือดาบเข้าโจมตีได้)
+function spawnBanditNPCAt(wx, wz) {
+  const wy = worldNoise.getHeight(wx, wz);
+  if (wy < WATER_LEVEL + 0.35) return;
+  const lv = Math.max(2, Math.min(30, Math.floor(Math.hypot(wx, wz) / 26) + 2));
+  const banditChar = new ArticulatedCharacter3D({
+    gender: 'male',
+    bodyType: 'male_hero',
+    skinColor: '#eab676',
+    hairStyle: 'wolf_cut',
+    hairColor: '#090d16',
+    eyeStyle: 'fierce',
+    eyeColor: '#ef4444',
+    expression: 'determined',
+    fullOutfit: 'none',
+    topStyle: 'hunter_jacket',
+    bottomStyle: 'pants',
+    primaryColor: '#450a0a',
+    secondaryColor: '#0f172a',
+    hasCape: true,
+    capeColor: '#1e293b',
+    weaponId: 'sword_flame'
+  });
+  banditChar.root.position.set(wx, wy, wz);
+  const monObj = {
+    id: `bandit_${Math.round(wx)}_${Math.round(wz)}`,
+    name: '🗡️ โจรป่าเขี้ยวทมิฬ (Bandit)',
+    type: 'goblin',
+    lv,
+    maxHp: 145 + lv * 35,
+    hp: 145 + lv * 35,
+    atk: 17 + lv * 4,
+    exp: 60 + lv * 18,
+    gold: 55 + lv * 15,
+    spawnX: wx,
+    spawnZ: wz,
+    patrolAngle: Math.random() * Math.PI * 2,
+    patrolRadius: 3.2,
+    patrolPause: 0,
+    mesh: banditChar.root,
+    char3D: banditChar,
+    vx: 0, vy: 0, vz: 0,
+    atkCooldown: 0,
+    animOffset: Math.random() * 10
+  };
+  banditChar.root.userData.isMonster = true;
+  banditChar.root.userData.monsterRef = monObj;
+  worldGroup.add(banditChar.root);
+  monsters.push(monObj);
+}
+
+// ขยาย generateChunk เพื่อสร้างภูเขาสูง ถ้ำ เหมือง และกองโจรป่าอัตโนมัติ
+const _origGenerateChunk = generateChunk;
+const _extendedChunkTasks = new Map();
+generateChunk = function (cx, cz) {
+  const key = `${cx},${cz}`;
+  if (chunkMap.has(key)) return Promise.resolve();
+  if (_extendedChunkTasks.has(key)) return _extendedChunkTasks.get(key);
+
+  const task = (async () => {
+    await _origGenerateChunk(cx, cz);
+    const chunkGroup = chunkMap.get(key);
+    if (!chunkGroup) return;
+    const centerWx = cx * CHUNK_SIZE;
+    const centerWz = cz * CHUNK_SIZE;
+
+    let nearTown = false;
+    for (const t of TOWNS) {
+      if (Math.hypot(centerWx - t.x, centerWz - t.z) < t.radius + 18) { nearTown = true; break; }
+    }
+    if (!nearTown) {
+      const featureHash = worldNoise.hash2D(cx * 91, cz * 47);
+      if (featureHash > 0.62) {
+        const glowAnchor = new THREE.Group();
+        glowAnchor.position.set(CHUNK_SIZE / 2, 0, CHUNK_SIZE / 2);
+        chunkGroup.add(glowAnchor);
+        attachLightDispersion(glowAnchor, 0x38bdf8, 3.8, 30);
+      }
+      if (featureHash > 0.45) {
+        spawnBanditNPCAt(centerWx + 6, centerWz - 6);
+      }
+    }
+  })();
+  _extendedChunkTasks.set(key, task);
+  task.finally(() => _extendedChunkTasks.delete(key)).catch(error => {
+    console.error(`Unable to finish map chunk ${key}:`, error);
+  });
+  return task;
+};
+
+// --- 15.8 เพิ่มร้านค้าจิปาถะ, ร้านแฟชั่น, ตลาดปลา และ NPC ทหารยาม/อัศวิน/นักผจญภัย ในทุกเมือง ---
+const _origBuildAllGrandCities = buildAllGrandCities;
+buildAllGrandCities = async function () {
+  await _origBuildAllGrandCities();
+
+  let townIndex = 0;
+  for (const town of TOWNS) {
+    setLoadingProgress(35 + (townIndex / TOWNS.length) * 8, `กำลังเตรียมร้านค้าและ NPC เมือง ${townIndex + 1}/${TOWNS.length}...`);
+    // 1) อาคารร้านค้าจิปาถะ (General Store)
+    buildEnterableBuilding({
+      wx: town.x + 22, wz: town.z - 36, width: 11, depth: 9, height: 5.0,
+      wallColor: 0xecfdf5, roofColor: 0x059669, rotY: 0,
+      title: '🏪 ร้านค้าจิปาถะ (General Store)', subTitle: 'ซื้อเบ็ดตกปลา & เหยื่อตกปลา', role: 'general_shop',
+      npcSpec: { name: 'พ่อค้ามาร์โค (ร้านจิปาถะ)', gender: 'male', outfit: 'none', primary: '#059669', hair: 'short_layered', weapon: 'staff_oak' }
+    });
+
+    // 2) อาคารตลาดซื้อ/ขายปลา (Fish Market)
+    buildEnterableBuilding({
+      wx: town.x + 54, wz: town.z + 2, width: 11, depth: 9, height: 5.0,
+      wallColor: 0xf0f9ff, roofColor: 0x0284c7, rotY: -Math.PI / 2,
+      title: '⚖️ ตลาดกลางซื้อ/ขายปลา (Fish Market)', subTitle: 'รับซื้อปลาทุกชนิดราคาสูง', role: 'fish_market',
+      npcSpec: { name: 'แม่ค้าลินดา (ตลาดซื้อ/ขายปลา)', gender: 'female', outfit: 'none', primary: '#0284c7', hair: 'ponytail', weapon: 'tome_holy' }
+    });
+
+    // 3) อาคารร้านค้าแฟชั่น (Fashion Boutique)
+    buildEnterableBuilding({
+      wx: town.x - 22, wz: town.z - 36, width: 11, depth: 9, height: 5.0,
+      wallColor: 0xfaf5ff, roofColor: 0x9333ea, rotY: 0,
+      title: '👗 ร้านค้าแฟชั่น (Fashion Boutique)', subTitle: 'ชุดแฟชั่น & ปีกขยับได้', role: 'fashion_shop',
+      npcSpec: { name: 'ดีไซเนอร์วิเวียน (ร้านแฟชั่น)', gender: 'female', outfit: 'royal_dress', primary: '#9333ea', hair: 'twintails', weapon: 'staff_void' }
+    });
+
+    // 4) เพิ่ม NPC ใหม่: ทหารยาม (Guard), อัศวิน (Knight), นักผจญภัย (Adventurer)
+    const extraNPCSpecs = [
+      { title: '🛡️ ทหารยามรักษาประตูเมือง', gender: 'male', outfit: 'paladin_armor', top: 'knight_vest', hair: 'short_layered', primary: '#1e40af', weapon: 'shield_knight', radius: 64, speed: 2.2, startAng: 1.2 },
+      { title: '⚔️ อัศวินราชองครักษ์', gender: 'male', outfit: 'paladin_armor', top: 'noble_coat', hair: 'wolf_cut', primary: '#b45309', weapon: 'shield_aegis', radius: 19, speed: 2.4, startAng: 3.5 },
+      { title: '🧭 นักผจญภัยล่าสมบัติ', gender: 'female', outfit: 'none', top: 'hunter_jacket', hair: 'ponytail', primary: '#047857', weapon: 'bow_wind', radius: 32, speed: 2.7, startAng: 2.1 },
+      { title: '🗡️ นักผจญภัยพเนจร', gender: 'male', outfit: 'none', top: 'hunter_jacket', hair: 'spiky', primary: '#7c2d12', weapon: 'sword_flame', radius: 48, speed: 2.6, startAng: 5.0 }
+    ];
+    const baseY = worldNoise.getHeight(town.x, town.z);
+    extraNPCSpecs.forEach((ws, idx) => {
+      const isF = ws.gender === 'female';
+      const wChar = new ArticulatedCharacter3D({
+        gender: ws.gender,
+        bodyType: isF ? 'female_grace' : 'male_hero',
+        skinColor: '#ffe9dc',
+        hairStyle: ws.hair,
+        hairColor: '#1c1917',
+        fullOutfit: ws.outfit,
+        topStyle: ws.top,
+        bottomStyle: isF ? 'battle_skirt' : 'pants',
+        primaryColor: ws.primary,
+        secondaryColor: '#1e293b',
+        accessory: idx === 1 ? 'angel_wings' : 'none',
+        hasCape: true,
+        capeColor: '#991b1b',
+        weaponId: ws.weapon
+      });
+      const initX = town.x + Math.cos(ws.startAng) * ws.radius;
+      const initZ = town.z + Math.sin(ws.startAng) * ws.radius;
+      wChar.root.position.set(initX, baseY, initZ);
+      wChar.root.userData = { isNPC: true, npcName: ws.title, role: 'citizen' };
+      worldGroup.add(wChar.root);
+      const labelItem = registerFloatingLabel(
+        wChar.root,
+        `<div class="px-2 py-0.5 rounded-full bg-slate-900/85 border border-amber-400/50 text-[9px] text-amber-200">${ws.title}</div>`,
+        2.3
+      );
+      wanderingNPCs.push({
+        char3D: wChar,
+        townCenter: { x: town.x, z: town.z },
+        baseY,
+        orbitRadius: ws.radius,
+        angle: ws.startAng,
+        speed: ws.speed,
+        pauseTimer: 0,
+        chatTimer: 5 + idx * 3,
+        title: ws.title,
+        labelItem,
+        chatterPool: [
+          "ระวังพวกโจรป่าแถวหน้าถ้ำและเหมืองแร่นอกเมืองด้วยล่ะ!",
+          "ซื้อเบ็ดกับเหยื่อที่ร้านจิปาถะ แล้วไปตกปลามาย่างแคมป์ไฟได้เลยนะ!",
+          "ปีกแฟชั่นที่ร้านของดีไซเนอร์วิเวียนขยับกระพือได้จริงด้วย สวยสุดๆ!"
+        ]
+      });
+    });
+    await waitForRenderFrame();
+    townIndex++;
+  }
+};
+
+// เชื่อมการกดคุย NPC ร้านค้าใหม่เข้ากับทั้งการกดปุ่ม [E] และการคลิกเมาส์
+const _origInteractNearest = interactWithNearestObject;
+interactWithNearestObject = function (isShiftPressed = false) {
+  if (isPlayerDead) return;
+  const pPos = playerChar3D.root.position;
+  for (const n of npcs) {
+    if (pPos.distanceTo(n.root.position) <= 4.5) {
+      const role = n.root.userData.role;
+      if (role === 'general_shop') {
+        sound.sfxClick(); releaseMouseForUI(); renderGeneralStoreModal();
+        document.getElementById('modal-general').classList.remove('hidden');
+        return;
+      }
+      if (role === 'fish_market') {
+        sound.sfxClick(); releaseMouseForUI(); renderFishMarketModal();
+        document.getElementById('modal-market').classList.remove('hidden');
+        return;
+      }
+      if (role === 'fashion_shop') {
+        sound.sfxClick(); releaseMouseForUI(); renderFashionShopModal();
+        document.getElementById('modal-fashion').classList.remove('hidden');
+        return;
+      }
+    }
+  }
+  // หากอยู่ใกล้แคมป์ไฟและมีปลาสดในกระเป๋า กด E เพื่อย่างปลาได้ทันที
+  for (const cf of animatedCampfires) {
+    const fPos = new THREE.Vector3();
+    cf.group.getWorldPosition(fPos);
+    if (pPos.distanceTo(fPos) <= 3.8 && ((playerStats.inventory.raw_carp || 0) > 0 || (playerStats.inventory.raw_salmon || 0) > 0 || (playerStats.inventory.golden_fish || 0) > 0)) {
+      grillFishAtCampfire();
+      return;
+    }
+  }
+  _origInteractNearest(isShiftPressed);
+};
+
+// เพิ่มการคลิกเมาส์เปิดร้านค้าจิปาถะ/ตลาด/แฟชั่น และปุ่มคีย์ลัด G (ตกปลา), C (ย่างปลา), H (กินปลา)
+renderer.domElement.addEventListener('click', (e) => {
+  if (gameState !== 'world' || isPlayerDead || cameraMode === 'tps' || cameraMode === 'fps') return;
+  const npcHits = raycaster.intersectObjects(npcs.map(n => n.root), true);
+  if (npcHits.length > 0) {
+    let obj = npcHits[0].object;
+    while (obj && !obj.userData.isNPC) obj = obj.parent;
+    if (obj) {
+      if (obj.userData.role === 'general_shop') { renderGeneralStoreModal(); document.getElementById('modal-general').classList.remove('hidden'); }
+      else if (obj.userData.role === 'fish_market') { renderFishMarketModal(); document.getElementById('modal-market').classList.remove('hidden'); }
+      else if (obj.userData.role === 'fashion_shop') { renderFashionShopModal(); document.getElementById('modal-fashion').classList.remove('hidden'); }
+    }
+  }
+});
+
+window.addEventListener('keydown', (e) => {
+  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+  if (gameState !== 'world' || isPlayerDead) return;
+  const k = (e.key || '').toLowerCase();
+  if (k === 'g' || k === 'เ') startFishingAction();
+  if (k === 'c' || k === 'แ') grillFishAtCampfire();
+  if (k === 'h' || k === '้') eatGrilledFish();
+});
+
+// --- 15.9 ระบบรองรับการเล่นบนมือถือ (Mobile Virtual Joystick & Touch Look) ---
+(function initMobileTouchControls() {
+  const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0 || window.innerWidth <= 900;
+  const mobileUI = document.getElementById('mobile-controls');
+  const toggleButton = document.getElementById('btn-toggle-mobile-ui');
+  let controlsVisible = isTouchDevice;
+  try {
+    const savedVisibility = localStorage.getItem('aethel_mobile_controls_visible_v1');
+    if (savedVisibility !== null) controlsVisible = savedVisibility === 'true';
+  } catch (error) {
+    console.warn('Unable to read mobile-control visibility preference:', error);
+  }
+
+  const syncMobileControls = (inWorld) => {
+    mobileUI?.classList.toggle('hidden', !inWorld || !controlsVisible);
+    toggleButton?.classList.toggle('hidden', !inWorld);
+    if (!inWorld || !controlsVisible) {
+      keys['w'] = keys['a'] = keys['s'] = keys['d'] = keys['shift'] = false;
+      joyTouchId = null;
+      if (knob) knob.style.transform = 'translate(0px, 0px)';
+    }
+    if (toggleButton) {
+      toggleButton.textContent = controlsVisible ? '🎮 ซ่อนปุ่มมือถือ' : '🎮 แสดงปุ่มมือถือ';
+      toggleButton.setAttribute('aria-pressed', String(controlsVisible));
+    }
+  };
+  window.__syncMobileControls = syncMobileControls;
+  toggleButton?.addEventListener('click', () => {
+    controlsVisible = !controlsVisible;
+    try {
+      localStorage.setItem('aethel_mobile_controls_visible_v1', String(controlsVisible));
+    } catch (error) {
+      console.warn('Unable to save mobile-control visibility preference:', error);
+    }
+    syncMobileControls(gameState === 'world');
+  });
+
+  const zone = document.getElementById('joystick-zone');
+  const knob = document.getElementById('joystick-knob');
+  let joyTouchId = null;
+
+  if (zone && knob) {
+    const updateJoystick = (clientX, clientY) => {
+      const rect = zone.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const maxR = rect.width / 2 - 12;
+      let dx = clientX - cx;
+      let dy = clientY - cy;
+      const dist = Math.hypot(dx, dy);
+      if (dist > maxR) {
+        dx = (dx / dist) * maxR;
+        dy = (dy / dist) * maxR;
+      }
+      knob.style.transform = `translate(${dx}px, ${dy}px)`;
+      keys['w'] = dy < -14;
+      keys['s'] = dy > 14;
+      keys['a'] = dx < -14;
+      keys['d'] = dx > 14;
+    };
+
+    const resetJoystick = () => {
+      joyTouchId = null;
+      knob.style.transform = `translate(0px, 0px)`;
+      keys['w'] = keys['a'] = keys['s'] = keys['d'] = false;
+    };
+
+    zone.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const t = e.changedTouches[0];
+      joyTouchId = t.identifier;
+      updateJoystick(t.clientX, t.clientY);
+    }, { passive: false });
+
+    zone.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      for (const t of e.changedTouches) {
+        if (t.identifier === joyTouchId) updateJoystick(t.clientX, t.clientY);
+      }
+    }, { passive: false });
+
+    zone.addEventListener('touchend', resetJoystick);
+    zone.addEventListener('touchcancel', resetJoystick);
+  }
+
+  // ลากนิ้วบนหน้าจอฝั่งขวาเพื่อหมุนมุมกล้อง 360 องศาบนมือถือ
+  let camTouchId = null;
+  let lastTouchX = 0, lastTouchY = 0;
+  renderer.domElement.addEventListener('touchstart', (e) => {
+    for (const t of e.changedTouches) {
+      if (t.clientX > window.innerWidth * 0.35 && camTouchId === null) {
+        camTouchId = t.identifier;
+        lastTouchX = t.clientX;
+        lastTouchY = t.clientY;
+      }
+    }
+  }, { passive: true });
+
+  renderer.domElement.addEventListener('touchmove', (e) => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === camTouchId) {
+        const dx = t.clientX - lastTouchX;
+        const dy = t.clientY - lastTouchY;
+        lastTouchX = t.clientX;
+        lastTouchY = t.clientY;
+        if (gameState === 'world') {
+          cameraYawAngle -= dx * 0.007;
+          cameraPitchAngle = THREE.MathUtils.clamp(cameraPitchAngle + dy * 0.005, 0.15, 1.15);
+        } else if (gameState === 'creator') {
+          creatorYaw += dx * 0.012;
+        }
+      }
+    }
+  }, { passive: true });
+
+  renderer.domElement.addEventListener('touchend', (e) => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === camTouchId) camTouchId = null;
+    }
+  });
+
+  // ผูกปุ่มกดบนมือถือ
+  const bindMobBtn = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('pointerdown', (e) => { e.preventDefault(); fn(); });
+  };
+  bindMobBtn('mob-btn-atk', () => queueOrPerformComboAttack());
+  bindMobBtn('mob-btn-skill1', () => triggerClassSkill(false));
+  bindMobBtn('mob-btn-ult', () => triggerClassSkill(true));
+  bindMobBtn('mob-btn-interact', () => interactWithNearestObject(false));
+  bindMobBtn('mob-btn-fish', () => startFishingAction());
+  bindMobBtn('mob-btn-cook', () => grillFishAtCampfire());
+  bindMobBtn('mob-btn-eat', () => eatGrilledFish());
+  bindMobBtn('mob-btn-jump', () => {
+    if (playerPhysics.jumpCount < 2 || playerPhysics.isInWater) {
+      playerPhysics.vy = playerPhysics.isInWater ? 7.5 : 10.5;
+      playerPhysics.isGrounded = false;
+      playerPhysics.jumpCount++;
+      sound.sfxJump();
+    }
+  });
+  bindMobBtn('mob-btn-dash', () => tryPlayerDash());
+
+  const sprintBtn = document.getElementById('mob-btn-sprint');
+  if (sprintBtn) {
+    sprintBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      keys['shift'] = true;
+      sprintBtn.setPointerCapture(e.pointerId);
+    });
+    const releaseSprint = () => { keys['shift'] = false; };
+    sprintBtn.addEventListener('pointerup', releaseSprint);
+    sprintBtn.addEventListener('pointercancel', releaseSprint);
+  }
+})();
+
+// --- 15.10 ลูปอัปเดตมินิเกมตกปลา, มินิเกมย่างไฟ, ความหิวลดแบบสมดุล (ช้าลง 25 เท่า) และโจรป่า ---
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') {
+    if (fishMinigameState.active) {
+      e.preventDefault();
+      handleFishingStrike();
+    } else if (grillMinigameState.active) {
+      e.preventDefault();
+      finishCampfireGrillMinigame();
+    }
+  }
+});
+
+// อัปเดตเข็มมินิเกมตกปลาและย่างไฟแบบลื่นไหล (ทุก 25ms)
+setInterval(() => {
+  const dt = 0.025;
+
+  if (fishMinigameState.active) {
+    fishMinigameState.needlePos += fishMinigameState.needleDir * fishMinigameState.needleSpeed * dt;
+    if (fishMinigameState.needlePos >= 96) { fishMinigameState.needlePos = 96; fishMinigameState.needleDir = -1; }
+    if (fishMinigameState.needlePos <= 2)  { fishMinigameState.needlePos = 2;  fishMinigameState.needleDir = 1; }
+
+    // ขยับตัวปลาเบาๆ เพิ่มความท้าทาย
+    fishMinigameState.zoneStart += fishMinigameState.zoneDir * 18 * dt;
+    if (fishMinigameState.zoneStart >= 96 - fishMinigameState.zoneWidth) fishMinigameState.zoneDir = -1;
+    if (fishMinigameState.zoneStart <= 4) fishMinigameState.zoneDir = 1;
+
+    const needleEl = document.getElementById('fish-needle');
+    const zoneEl = document.getElementById('fish-target-zone');
+    if (needleEl) needleEl.style.left = `${fishMinigameState.needlePos}%`;
+    if (zoneEl) {
+      zoneEl.style.left = `${fishMinigameState.zoneStart}%`;
+      zoneEl.style.width = `${fishMinigameState.zoneWidth}%`;
+    }
+  }
+
+  if (grillMinigameState.active) {
+    const spd = (grillMinigameState.recipe?.speed || 1.1) * 75;
+    grillMinigameState.needlePos += grillMinigameState.needleDir * spd * dt;
+    if (grillMinigameState.needlePos >= 97) { grillMinigameState.needlePos = 97; grillMinigameState.needleDir = -1; }
+    if (grillMinigameState.needlePos <= 2)  { grillMinigameState.needlePos = 2;  grillMinigameState.needleDir = 1; }
+
+    const gNeedle = document.getElementById('grill-needle');
+    if (gNeedle) gNeedle.style.left = `${grillMinigameState.needlePos}%`;
+  }
+}, 25);
+
+// ลูปอัปเดตค่าความหิว (ปรับให้ลดช้าลงมาก: อยู่เฉยๆ/เดินปกติใช้เวลา ~20 นาทีจริงกว่าจะหมดหลอด!)
+setInterval(() => {
+  if (gameState !== 'world') return;
+
+  // ลดเพียง 0.08 ต่อวินาที (จากเดิมลด 2.0 ต่อวินาที)
+  const hungerDrainPerSec = keys['shift'] ? 0.16 : 0.07;
+  playerStats.hunger = Math.max(0, (playerStats.hunger ?? 100) - hungerDrainPerSec);
+  if (playerStats.hunger <= 0) {
+    playerStats.hp = Math.max(1, playerStats.hp - 1.0);
+  }
+
+  // อัปเดตอนิเมชั่นของ NPC โจรป่า (Bandits)
+  monsters.forEach(m => {
+    if (m.char3D && m.hp > 0 && m.mesh.visible) {
+      m.char3D.updateAnimation(0.2, 0.8, false, 0, 0, false);
+    }
+  });
+
+  updateHUD();
+}, 1000);
+
+// ============================================================================
+// 16. PATCH: ระบบความหิวลดถึง 0 แล้วตาย & ระบบไฟส่องสว่างโถงถ้ำ/หินเรืองแสง
+// ============================================================================
+
+// ตรวจสอบการตายกรณีปล่อยให้ความหิวลดเหลือ 0 จนเลือดหมด
+setInterval(() => {
+  if (gameState !== 'world' || isPlayerDead) return;
+  if (playerStats.hunger <= 0 && playerStats.hp <= 1) {
+    playerStats.hp = 0;
+    handlePlayerDeath("ความหิวโหย");
+  }
+}, 500);
+
+// ระบบไฟส่องสว่างภายในโถงถ้ำและคริสตัลเรืองแสง (แก้ปัญหาถ้ำมืดตึบ 100%)
+const caveAmbientLight = new THREE.PointLight(0x38bdf8, 0, 65, 0.35);
+scene.add(caveAmbientLight);
+
+export function enhanceCaveCrystalGlowingLight(crystalMesh, colorHex = 0x38bdf8) {
+  if (!crystalMesh) return;
+  crystalMesh.traverse((child) => {
+    if (child.isMesh && child.material) {
+      child.material.emissive = new THREE.Color(colorHex);
+      child.material.emissiveIntensity = 3.2;
+    }
+  });
+  attachLightDispersion(crystalMesh, colorHex, 8.5, 48);
+}
+
+// อัปเดตแสงสว่างเมื่อผู้เล่นเดินเข้าใกล้หรืออยู่ในโถงถ้ำ/เหมืองอัตโนมัติ
+setInterval(() => {
+  if (gameState !== 'world' || !playerChar3D?.root) return;
+  const pPos = playerChar3D.root.position;
+  caveAmbientLight.position.set(pPos.x, pPos.y + 3.5, pPos.z);
+
+  let nearGlowingCrystal = false;
+  for (let i = 0; i < farmingNodes.length; i++) {
+    const n = farmingNodes[i];
+    if (n.active && n.matId === 'mithril_ore' && Math.hypot(pPos.x - n.x, pPos.z - n.z) < 28) {
+      nearGlowingCrystal = true;
+      break;
+    }
+  }
+  caveAmbientLight.intensity = nearGlowingCrystal ? 4.8 : 0.0;
+}, 200);
+
+
+// ----------------------------------------------------------------------------
+// A. เชื่อมอนิเมชั่นก้มวิ่ง 45 องศา + ฟิสิกส์เสื้อผ้าจาก anim.js เข้ากับตัวละคร
+// ----------------------------------------------------------------------------
+const _baseCharAnim = ArticulatedCharacter3D.prototype.updateAnimation;
+ArticulatedCharacter3D.prototype.updateAnimation = function (dt, speedRatio = 0, isJumping = false, verticalVelocity = 0, turnDelta = 0, isInWater = false) {
+  const previousTurnPose = this._advancedTurnPose;
+  if (previousTurnPose) {
+    if (this.joints.waist) this.joints.waist.rotation.y -= previousTurnPose.waistY;
+    if (this.joints.torso) {
+      this.joints.torso.rotation.y -= previousTurnPose.torsoY;
+      this.joints.torso.rotation.z -= previousTurnPose.torsoZ;
+    }
+  }
+  this._advancedTurnPose = null;
+  _baseCharAnim.call(this, dt, speedRatio, isJumping, verticalVelocity, turnDelta, isInWater);
+  applyAdvancedCharacterAndClothAnim(this, dt, speedRatio, isJumping, isInWater, turnDelta, graphicsConfig.clothPhysics);
+};
+
+// ----------------------------------------------------------------------------
+// B. ระบบตารางเวลารถม้าประจำวัน (จอดพัก / วิ่งตามถนนเชื่อมเมือง A -> B -> C -> D ไม่ชนตึก!)
+// ----------------------------------------------------------------------------
+function buildSafeCarriageWaypoints(townIdx) {
+  const tA = TOWNS[townIdx % TOWNS.length];
+  const tB = TOWNS[(townIdx + 1) % TOWNS.length];
+  const tC = TOWNS[(townIdx + 2) % TOWNS.length];
+  // วิ่งเฉพาะบนถนนสายหลักผ่ากลางประตูเมืองทิศใต้ (x = town.x) ออกไปนอกกำแพงเมือง จึงไม่ชนตึก 100%!
+  return [
+    new THREE.Vector3(tA.x, 0, tA.z + 10),             // จุดรับผู้โดยสารจัตุรัสกลางเมือง A
+    new THREE.Vector3(tA.x, 0, tA.z + tA.radius + 16), // ถนนหน้าประตูทิศใต้เมือง A
+    new THREE.Vector3(tB.x, 0, tB.z + tB.radius + 16), // ถนนหลวงเชื่อมไปหน้าประตูเมือง B
+    new THREE.Vector3(tB.x, 0, tB.z + 10),             // เข้าจัตุรัสกลางเมือง B
+    new THREE.Vector3(tB.x, 0, tB.z + tB.radius + 16), // ออกจากประตูเมือง B
+    new THREE.Vector3(tC.x, 0, tC.z + tC.radius + 16), // มุ่งหน้าสู่เมือง C
+    new THREE.Vector3(tA.x, 0, tA.z + tA.radius + 16)  // วนกลับเมือง A
+  ];
+}
+
+export function updateCarriageDailySchedule(car, carIdx, dt, elapsed) {
+  if (!car.waypoints) {
+    car.waypoints = buildSafeCarriageWaypoints(carIdx);
+    car.wpIndex = 0;
+  }
+
+  // คำนวณตารางเวลาประจำวัน (อิงจากเวลาในเกม)
+  const scheduleSlot = Math.floor((Date.now() / 1000) / 90 + carIdx) % 4;
+  // Slot 0 = วันจอดพักหน้าสถานี, Slot 1-3 = วิ่งเดินทางข้ามเมือง A -> B -> C
+  const isParkedToday = (scheduleSlot === 0);
+
+  if (isParkedToday && car.wpIndex === 0) {
+    // จอดนิ่งๆ ให้ม้ายืนหายใจเบาๆ
+    if (car.horseMesh) car.horseMesh.userData.animSpeedMultiplier = 0.0;
+    return;
+  }
+
+  if (car.horseMesh) car.horseMesh.userData.animSpeedMultiplier = 1.25;
+
+  const targetWP = car.waypoints[car.wpIndex];
+  const pos = car.group.position;
+  const dx = targetWP.x - pos.x;
+  const dz = targetWP.z - pos.z;
+  const dist = Math.hypot(dx, dz);
+
+  if (dist < 2.2) {
+    car.wpIndex = (car.wpIndex + 1) % car.waypoints.length;
+  } else {
+    const moveSpd = car.speed * 1.65;
+    const stepX = (dx / dist) * moveSpd * dt;
+    const stepZ = (dz / dist) * moveSpd * dt;
+    const nextX = pos.x + stepX;
+    const nextZ = pos.z + stepZ;
+    const nextY = worldNoise.getHeight(nextX, nextZ);
+
+    pos.set(nextX, nextY, nextZ);
+    const targetRot = Math.atan2(dx, dz);
+    car.group.rotation.y = smoothRotateAngle(car.group.rotation.y, targetRot, dt * 6.0);
+    car.wheels.forEach(w => { w.rotation.x += dt * moveSpd * 1.5; });
+  }
+
+  if (ridingCarriage === car) {
+    playerChar3D.root.position.set(pos.x, pos.y + 1.15, pos.z);
+    playerPhysics.vx = 0; playerPhysics.vy = 0; playerPhysics.vz = 0;
+    playerPhysics.isGrounded = true;
+    playerChar3D.animState = 'sit';
+    playerPhysics.targetRotY = car.group.rotation.y;
+  }
+}
+
+// ----------------------------------------------------------------------------
+// C. ถ้ำเขาวงกตใต้พิภพขนาดมหึมา (Zero-Lag InstancedMesh Labyrinth Cave)
+//    มีหลายห้องโถง, ทางเดินคดเคี้ยว, หลุมเหว, สะพานหิน, กับดักหนาม และหีบสมบัติ
+// ----------------------------------------------------------------------------
+export const caveChests = [];
+export const caveHazards = [];
+export const cavePitZones = [];
+
+export function buildDeepLabyrinthCave(worldGroup, worldNoise, worldColliders, registerBoxCollider, registerFloatingLabel) {
+  // ปากทางเข้าถ้ำอยู่ที่พิกัด (88, -110) นอกเมืองเอเธลการ์ด
+  const entranceX = 88;
+  const entranceZ = -110;
+  const entranceY = worldNoise.getHeight(entranceX, entranceZ);
+
+  // แผนผังเขาวงกตถ้ำ 15x15 ช่อง (ขนาดช่องละ 12x12 เมตร = ถ้ำกว้าง 180x180 เมตร ลึกสำรวจได้นาน!)
+  // 1 = ผนังหินถ้ำ, 0 = ทางเดินคดเคี้ยว, 2 = ห้องโถงใหญ่, 3 = สะพานข้ามเหวลึก, 4 = ห้องสมบัติลับ, 5 = กับดักหนาม
+  const CAVE_GRID = [
+    [1,1,1,1,1,1,1,0,1,1,1,1,1,1,1],
+    [1,4,0,0,1,0,0,0,0,0,1,0,0,4,1],
+    [1,1,1,0,1,0,1,1,1,0,1,0,1,1,1],
+    [1,0,0,0,5,0,1,2,2,0,0,5,0,0,1],
+    [1,0,1,1,1,1,1,2,2,1,1,1,1,0,1],
+    [1,0,1,4,0,0,0,0,0,0,0,4,1,0,1],
+    [1,0,1,1,1,0,1,3,1,0,1,1,1,0,1],
+    [1,0,0,5,0,0,1,3,1,0,0,5,0,0,1],
+    [1,1,1,0,1,1,1,3,1,1,1,0,1,1,1],
+    [1,2,2,0,0,0,2,2,2,0,0,0,2,2,1],
+    [1,2,2,1,1,0,2,2,2,0,1,1,2,2,1],
+    [1,0,0,0,1,0,1,3,1,0,1,0,0,0,1],
+    [1,0,1,5,1,0,1,3,1,0,1,5,1,0,1],
+    [1,4,1,0,0,0,0,2,0,0,0,0,1,4,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+  ];
+
+  const CELL = 12.0;
+  const WALL_H = 11.0;
+  const startOriginX = entranceX - 7 * CELL;
+  const startOriginZ = entranceZ - 12;
+
+  const wallRockMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.9 });
+  const floorRockMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.95 });
+  const crystalMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0284c7, emissiveIntensity: 1.8 });
+  const goldChestMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, metalness: 0.8, roughness: 0.25 });
+
+  // นับจำนวนบล็อกเพื่อสร้าง InstancedMesh เพียงตัวเดียว (ไม่แล็ค 100%)
+  const wallCells = [];
+  const floorCells = [];
+  const crystalCells = [];
+
+  for (let r = 0; r < 15; r++) {
+    for (let c = 0; c < 15; c++) {
+      const type = CAVE_GRID[r][c];
+      const wx = startOriginX + c * CELL;
+      const wz = startOriginZ - r * CELL;
+
+      if (type === 1) {
+        wallCells.push({ wx, wz });
+      } else {
+        floorCells.push({ wx, wz, type, r, c });
+        if ((r + c) % 3 === 0) crystalCells.push({ wx, wz });
+      }
+    }
+  }
+
+  const wallInst = new THREE.InstancedMesh(new THREE.BoxGeometry(CELL, WALL_H, CELL), wallRockMat, wallCells.length);
+  const ceilingInst = new THREE.InstancedMesh(new THREE.BoxGeometry(CELL + 0.5, 2.5, CELL + 0.5), wallRockMat, floorCells.length);
+  const floorInst = new THREE.InstancedMesh(new THREE.BoxGeometry(CELL, 1.0, CELL), floorRockMat, floorCells.length);
+  const crystalInst = new THREE.InstancedMesh(new THREE.OctahedronGeometry(0.95, 0), crystalMat, crystalCells.length);
+
+  const dummy = new THREE.Object3D();
+
+  // 1) วางผนังเขาวงกตถ้ำ + Collider
+  wallCells.forEach((w, idx) => {
+    dummy.position.set(w.wx, entranceY + WALL_H * 0.5, w.wz);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    wallInst.setMatrixAt(idx, dummy.matrix);
+    registerBoxCollider(worldColliders, w.wx, w.wz, CELL, CELL, entranceY + WALL_H, false, entranceY - 2);
+  });
+
+  // 2) วางเพดานถ้ำ พื้นห้องโถง สะพานข้ามเหว กับดัก และหีบสมบัติ
+  floorCells.forEach((f, idx) => {
+    // เพดานถ้ำมืดสนิทด้านบน
+    dummy.position.set(f.wx, entranceY + WALL_H + 1.0, f.wz);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    ceilingInst.setMatrixAt(idx, dummy.matrix);
+
+    if (f.type === 3) {
+      // ช่องที่ 3 = เหวลึก (Pit/Cliff) มีเฉพาะสะพานหินแคบๆ กว้าง 2.6 เมตรพาดตรงกลาง!
+      dummy.position.set(f.wx, entranceY - 0.4, f.wz);
+      dummy.scale.set(0.22, 1, 1); // สะพานแคบ ถ้าเดินตกข้างๆ จะร่วงลงเหว!
+      dummy.updateMatrix();
+      floorInst.setMatrixAt(idx, dummy.matrix);
+      registerBoxCollider(worldColliders, f.wx, f.wz, 2.6, CELL, entranceY + 0.1, true, entranceY - 1.0);
+      cavePitZones.push({ wx: f.wx, wz: f.wz, halfSize: CELL * 0.48, bridgeHalfW: 1.35, surfaceY: entranceY });
+    } else {
+      // พื้นถ้ำปกติและห้องโถงใหญ่
+      dummy.position.set(f.wx, entranceY - 0.4, f.wz);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      floorInst.setMatrixAt(idx, dummy.matrix);
+      registerBoxCollider(worldColliders, f.wx, f.wz, CELL, CELL, entranceY + 0.05, true, entranceY - 1.0);
+    }
+
+    // ช่องที่ 4 = หีบสมบัติโบราณ (Treasure Chest)
+    if (f.type === 4) {
+      const chestGroup = new THREE.Group();
+      chestGroup.position.set(f.wx, entranceY + 0.1, f.wz);
+      const box = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.0, 1.0), goldChestMat);
+      box.position.y = 0.5;
+      chestGroup.add(box);
+      worldGroup.add(chestGroup);
+
+      const chestObj = { wx: f.wx, wy: entranceY, wz: f.wz, mesh: chestGroup, opened: false };
+      caveChests.push(chestObj);
+      registerFloatingLabel(
+        chestGroup,
+        `<div class="px-2.5 py-0.5 rounded-full bg-amber-950/90 border border-amber-400 text-[10px] text-amber-200 font-bold">💎 หีบสมบัติเขาวงกตโบราณ [กด E เปิด]</div>`,
+        1.6
+      );
+    }
+
+    // ช่องที่ 5 = กับดักหนามคริสตัล (Obstacle Hazard)
+    if (f.type === 5) {
+      const spike = new THREE.Mesh(
+        new THREE.ConeGeometry(1.2, 2.8, 6),
+        new THREE.MeshStandardMaterial({ color: 0xf43f5e, emissive: 0xe11d48, emissiveIntensity: 1.5 })
+      );
+      spike.position.set(f.wx, entranceY + 1.2, f.wz);
+      worldGroup.add(spike);
+      caveHazards.push({ mesh: spike, wx: f.wx, wz: f.wz, baseY: entranceY });
+    }
+  });
+
+  // 3) คริสตัลเรืองแสงตามผนังถ้ำ
+  crystalCells.forEach((cr, idx) => {
+    dummy.position.set(cr.wx + 3.8, entranceY + 2.5, cr.wz);
+    dummy.scale.set(1, 1.8, 1);
+    dummy.updateMatrix();
+    crystalInst.setMatrixAt(idx, dummy.matrix);
+  });
+
+  [wallInst, ceilingInst, floorInst, crystalInst].forEach(inst => {
+    inst.instanceMatrix.needsUpdate = true;
+    worldGroup.add(inst);
+  });
+
+  // ป้ายหน้าปากถ้ำเขาวงกต
+  const entranceAnchor = new THREE.Object3D();
+  entranceAnchor.position.set(entranceX, entranceY + 4.5, entranceZ + 4);
+  worldGroup.add(entranceAnchor);
+  registerFloatingLabel(
+    entranceAnchor,
+    `<div class="px-3.5 py-1 rounded-xl bg-slate-950/95 border-2 border-cyan-400 text-center shadow-2xl">
+      <div class="text-xs font-extrabold text-cyan-300">🕳️ ถ้ำเขาวงกตบาดาลเอเธลการ์ด (Labyrinth Abyss Cave)</div>
+      <div class="text-[10px] text-amber-300">ระวังสะพานข้ามเหว & กับดักหนาม | ค้นหาหีบสมบัติลับทั้ง 6 จุด!</div>
+    </div>`,
+    0
+  );
+}
+
+// อัปเดตกับดักหนาม + เช็คตกเหวในถ้ำ + เปิดหีบสมบัติ
+export function updateLabyrinthCaveMechanics(dt, elapsed, playerPos, playerStats, callbacks) {
+  // 1) ขยับหนามคริสตัลขึ้น-ลง
+  for (let i = 0; i < caveHazards.length; i++) {
+    const h = caveHazards[i];
+    const sy = Math.sin(elapsed * 4.5 + i) * 1.3;
+    h.mesh.position.y = h.baseY + Math.max(-0.8, sy);
+    if (sy > 0.3 && Math.hypot(playerPos.x - h.wx, playerPos.z - h.wz) < 1.65) {
+      playerStats.hp = Math.max(1, playerStats.hp - 15 * dt);
+      callbacks.updateHUD();
+    }
+  }
+
+  // 2) เช็คการก้าวพลาดตกสะพานเหวในถ้ำ
+  for (let i = 0; i < cavePitZones.length; i++) {
+    const pit = cavePitZones[i];
+    if (Math.abs(playerPos.x - pit.wx) < pit.halfSize && Math.abs(playerPos.z - pit.wz) < pit.halfSize) {
+      // ถ้าออกนอกความกว้างสะพาน (1.35m) จะร่วงตกลงไปในเหว!
+      if (Math.abs(playerPos.x - pit.wx) > pit.bridgeHalfW) {
+        playerStats.hp = Math.max(10, playerStats.hp - 35);
+        playerPos.set(pit.wx, pit.surfaceY + 0.5, pit.wz + pit.halfSize + 1.5);
+        callbacks.sound.sfxHit();
+        callbacks.showFloatingDamage(playerPos, '⚠️ ตกเหวในถ้ำ! -35 HP', '#f43f5e');
+        callbacks.addLog('🕳️ คุณก้าวพลาดตกสะพานหน้าผาในถ้ำ! (-35 HP)', 'text-rose-400 font-bold');
+        callbacks.updateHUD();
+      }
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// D. ระบบกระเป๋า Inventory สไตล์ FiveM (ตามภาพตัวอย่าง)
+// ----------------------------------------------------------------------------
+let activeFiveMCategory = 'all';
+let fiveMSearchQuery = '';
+
+export function renderFiveMInventoryModal() {
+  const modal = document.getElementById('modal-inventory');
+  if (!modal) return;
+
+  // สร้างโครงสร้าง UI สไตล์ FiveM
+  const allItems = [];
+
+  // 1) บัตรประจำตัวผู้กล้า & กุญแจห้องพัก
+  allItems.push({
+    id: 'id_card', name: `บัตรผู้กล้า ${currentConfig.name}`, icon: '🪪', qty: 1, max: 1, category: 'keys',
+    onClick: () => addLog(`🪪 บัตรประจำตัว: ${currentConfig.name} (Lv.${playerStats.level})`, 'text-sky-300')
+  });
+  (playerStats.roomKeys || []).forEach(k => {
+    allItems.push({
+      id: `key_${k}`, name: `กุญแจห้องพัก ${k}`, icon: '🔑', qty: 1, max: 1, category: 'keys',
+      onClick: () => addLog(`🔑 กุญแจสำหรับไขห้องพักโรงเตี๋ยม #${k}`, 'text-amber-300')
+    });
+  });
+
+  // 2) น้ำและอาหาร / โพชั่น
+  if (playerStats.hpPots > 0) {
+    allItems.push({
+      id: 'hp_pot', name: 'โพชั่นฟื้นฟู HP', icon: '🧪', qty: playerStats.hpPots, max: 20, category: 'food',
+      onClick: () => { document.getElementById('slot-hp-pot')?.click(); renderFiveMInventoryModal(); }
+    });
+  }
+  if (playerStats.mpPots > 0) {
+    allItems.push({
+      id: 'mp_pot', name: 'โพชั่นฟื้นฟู MP', icon: '💧', qty: playerStats.mpPots, max: 20, category: 'food',
+      onClick: () => { document.getElementById('slot-mp-pot')?.click(); renderFiveMInventoryModal(); }
+    });
+  }
+
+  // 3) วัตถุดิบฟาร์ม อุปกรณ์ทำงาน และปลา
+  Object.values(FARM_MATERIALS).forEach(mat => {
+    const qty = playerStats.inventory[mat.id] || 0;
+    if (qty <= 0) return;
+    const isFood = ['grilled_fish', 'grilled_meat', 'baked_wheat'].includes(mat.id);
+    const isTool = ['fishing_rod', 'fishing_bait'].includes(mat.id);
+    allItems.push({
+      id: mat.id,
+      name: mat.name,
+      icon: mat.icon,
+      qty,
+      max: isTool ? 50 : 100,
+      category: isFood ? 'food' : isTool ? 'tools' : 'materials',
+      onClick: () => {
+        if (isFood) {
+          eatGrilledFish();
+          renderFiveMInventoryModal();
+        } else {
+          playerStats.inventory[mat.id]--;
+          playerStats.gold += mat.sellPrice;
+          sound.sfxCoin();
+          updateHUD();
+          renderFiveMInventoryModal();
+        }
+      }
+    });
+  });
+
+  // 4) อาวุธในครอบครอง
+  playerStats.ownedWeapons.forEach(wid => {
+    const w = WEAPONS[wid];
+    if (!w) return;
+    const isEq = currentConfig.weaponId === wid;
+    allItems.push({
+      id: wid,
+      name: isEq ? `${w.name} (สวมใส่)` : w.name,
+      icon: w.icon || '⚔️',
+      qty: 1,
+      max: 1,
+      category: 'weapons',
+      equipped: isEq,
+      onClick: () => {
+        const cls = CLASSES[currentConfig.classId];
+        if (cls.allowedWeapon !== 'any' && cls.allowedWeapon !== w.type) {
+          addLog('❌ อาชีพของคุณไม่สามารถถืออาวุธชนิดนี้ได้!', 'text-rose-400');
+          return;
+        }
+        currentConfig.weaponId = wid;
+        sound.sfxClick();
+        rebuildPreviewCharacter();
+        recalculateStats();
+        renderFiveMInventoryModal();
+      }
+    });
+  });
+
+  ensureFashionState(playerStats, currentConfig);
+  playerStats.ownedFashion.forEach(id => {
+    const item = FASHION_CATALOG.find(entry => entry.id === id);
+    if (!item) return;
+    const equipped = playerStats.equippedFashion.includes(id);
+    allItems.push({
+      id: `fashion_${id}`,
+      name: `${equipped ? 'สวมใส่: ' : ''}${item.name}`,
+      icon: item.category === 'wing' ? '🪽' : item.category === 'hat' ? '👑' : item.category === 'effect' ? '✨' : '👗',
+      qty: 1,
+      max: 1,
+      category: 'fashion',
+      equipped,
+      onClick: () => {
+        if (setFashionItem(id).ok) {
+          rebuildPreviewCharacter();
+          updateHUD();
+          savePlayerToRTDB();
+          broadcastMyStateToRTDB();
+        }
+        renderFiveMInventoryModal();
+      }
+    });
+  });
+
+  const categories = [
+    { id: 'all',       label: '⊞ ทั้งหมด' },
+    { id: 'keys',      label: '🔑 กุญแจ/บัตร' },
+    { id: 'food',      label: '🍖 น้ำและอาหาร' },
+    { id: 'tools',     label: '🛠️ อุปกรณ์ทำงาน' },
+    { id: 'materials', label: '💎 ของฟาร์ม' },
+    { id: 'weapons',   label: '🗡️ อาวุธ' },
+    { id: 'fashion',   label: '👗 แฟชั่น' }
+  ];
+
+  const filtered = allItems.filter(it => {
+    const matchCat = activeFiveMCategory === 'all' || it.category === activeFiveMCategory;
+    const matchSearch = !fiveMSearchQuery || it.name.toLowerCase().includes(fiveMSearchQuery.toLowerCase());
+    return matchCat && matchSearch;
+  });
+
+  modal.innerHTML = `
+    <div class="w-full max-w-5xl rounded-3xl p-5 flex flex-col justify-between shadow-2xl border border-white/10" style="background: rgba(16, 17, 23, 0.96); min-height: 540px; max-height: 88vh;">
+      <!-- Top Bar: Categories & Search -->
+      <div class="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-white/10">
+        <div class="flex flex-wrap items-center gap-1.5">
+          ${categories.map(cat => `
+            <button data-cat="${cat.id}" class="fivem-cat-btn px-3.5 py-1.5 rounded-full text-xs font-bold transition ${ activeFiveMCategory === cat.id ? 'bg-rose-600 text-white shadow-[0_0_12px_rgba(225,29,72,0.6)]' : 'bg-zinc-900/90 hover:bg-zinc-800 text-zinc-400 border border-white/10' }">${cat.label}</button>
+          `).join('')}
+        </div>
+        <div class="flex items-center gap-2">
+          <div class="relative flex items-center bg-zinc-900 border border-white/15 rounded-full overflow-hidden">
+            <input id="fivem-search-input" type="text" value="${fiveMSearchQuery}" placeholder="ค้นหาสิ่งของ.." class="bg-transparent px-3.5 py-1 text-xs text-white outline-none w-40" />
+            <span class="bg-rose-600 px-3 py-1.5 text-xs text-white font-bold">🔍</span>
+          </div>
+          <button id="fivem-close-btn" class="px-3 py-1 rounded-full bg-zinc-800 hover:bg-rose-600 text-xs text-white font-bold">✕</button>
+        </div>
+      </div>
+
+      <!-- Center Grid: 9 Columns FiveM Cards -->
+      <div class="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-8 lg:grid-cols-9 gap-2.5 my-4 overflow-y-auto custom-scroll pr-1 flex-1 content-start">
+        ${filtered.map((item, idx) => `
+          <div data-idx="${idx}" class="fivem-item-card relative rounded-2xl p-2.5 flex flex-col items-center justify-between cursor-pointer transition hover:scale-105 hover:border-rose-500/80 border ${
+            item.equipped ? 'border-emerald-400 bg-zinc-800/90' : 'border-white/15 bg-zinc-900/85'
+          }" style="height: 118px;">
+            <span class="absolute top-2 left-2 text-[9px] text-rose-500">♦</span>
+            <div class="text-[11px] font-bold text-zinc-200">${item.qty} / ${item.max}</div>
+            <div class="text-3xl my-1 select-none drop-shadow">${item.icon}</div>
+            <div class="text-[10px] font-semibold text-zinc-200 text-center leading-tight line-clamp-2 w-full">${item.name}</div>
+          </div>
+        `).join('')}
+      </div>
+
+      <!-- Bottom Status Bar -->
+      <div class="flex flex-wrap items-center justify-between pt-3 border-t border-white/10 text-xs text-zinc-300">
+        <div class="flex items-center gap-4">
+          <label class="flex items-center gap-2 cursor-pointer">
+            <span class="w-9 h-5 rounded-full bg-rose-600 flex items-center justify-end px-0.5"><span class="w-4 h-4 rounded-full bg-white"></span></span>
+            <span class="font-bold text-white">รับมอบของ</span>
+          </label>
+          <div>👤 <b>ID: ${myClientId.slice(-4).toUpperCase()}</b></div>
+          <div>🪙 <b>${playerStats.gold.toLocaleString()} G</b></div>
+          <div>🏛️ <b>ตู้เซฟ: ${(playerStats.roomStorage?.gold || 0).toLocaleString()} G</b></div>
+        </div>
+        <div class="text-[11px] text-zinc-400">คลิกไอเทมเพื่อ <b>ใช้ / สวมอาวุธ / ขายของ / เปลี่ยนแฟชั่น</b></div>
+      </div>
+    </div>
+  `;
+
+  modal.querySelectorAll('.fivem-cat-btn').forEach(btn => {
+    btn.onclick = () => {
+      activeFiveMCategory = btn.dataset.cat;
+      renderFiveMInventoryModal();
+    };
+  });
+  const searchInp = modal.querySelector('#fivem-search-input');
+  if (searchInp) {
+    searchInp.oninput = (e) => {
+      fiveMSearchQuery = e.target.value;
+      renderFiveMInventoryModal();
+    };
+  }
+  modal.querySelector('#fivem-close-btn').onclick = () => modal.classList.add('hidden');
+  modal.querySelectorAll('.fivem-item-card').forEach(card => {
+    card.onclick = () => {
+      const item = filtered[Number(card.dataset.idx)];
+      if (item && item.onClick) item.onClick();
+    };
+  });
+}
+
+// แทนที่ renderInventoryModal เดิมด้วย FiveM UI ทันที
+renderInventoryModal = renderFiveMInventoryModal;
+
+// บังคับให้การซื้อแฟชั่นต้องเดินไปที่ร้านค้าแฟชั่นในเมืองเท่านั้น (ไม่ให้กดเปิดซื้อเองกลางอากาศ)
+document.getElementById('btn-open-customize').onclick = () => {
+  sound.sfxClick();
+  addLog("👗 กรุณาเดินทางไปคุยกับ <b>ดีไซเนอร์วิเวียน</b> ที่ร้านแฟชั่นในเมือง เพื่อเลือกซื้อและสวมใส่ชุดแฟชั่น!", "text-purple-300 font-bold");
+};

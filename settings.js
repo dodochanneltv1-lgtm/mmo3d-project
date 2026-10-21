@@ -4,6 +4,9 @@ import * as THREE from 'three';
 const SETTINGS_STORAGE_KEY = 'aethel_graphics_settings_v1';
 const IDB_NAME = 'AethelgardWorldCacheDB';
 const IDB_STORE = 'chunk_blueprints';
+const DEFAULT_GRAPHICS_PRESET = window.matchMedia('(pointer: coarse), (max-width: 900px)').matches
+  ? 'potato'
+  : 'low';
 
 export const GRAPHICS_PRESETS = {
   potato: {
@@ -27,7 +30,7 @@ export const GRAPHICS_PRESETS = {
     shadows: false,
     shadowMapSize: 1024,
     usePostProc: false,
-    weatherParticles: true,
+    weatherParticles: false,
     minimapRadius: 90
   },
   medium: {
@@ -73,10 +76,19 @@ function loadSavedSettings() {
   try {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (raw) {
-      return { preset: 'medium', showFPS: true, ...GRAPHICS_PRESETS.medium, ...JSON.parse(raw) };
+      return {
+        preset: DEFAULT_GRAPHICS_PRESET,
+        showFPS: true,
+        ...GRAPHICS_PRESETS[DEFAULT_GRAPHICS_PRESET],
+        ...JSON.parse(raw)
+      };
     }
   } catch (_) {}
-  return { preset: 'medium', showFPS: true, ...GRAPHICS_PRESETS.medium };
+  return {
+    preset: DEFAULT_GRAPHICS_PRESET,
+    showFPS: true,
+    ...GRAPHICS_PRESETS[DEFAULT_GRAPHICS_PRESET]
+  };
 }
 
 export const gameSettings = loadSavedSettings();
@@ -214,13 +226,22 @@ export function applyGraphicsSettingsToEngine(ctx) {
 
   // 1. ปรับความละเอียดภาพ (Pixel Ratio)
   if (renderer) {
-    renderer.setPixelRatio(gameSettings.pixelRatio);
+    const isCompactDevice = window.matchMedia('(pointer: coarse), (max-width: 900px)').matches;
+    const maxPixelRatio = isCompactDevice ? 1 : 1.25;
+    renderer.setPixelRatio(Math.min(gameSettings.pixelRatio || 1, maxPixelRatio));
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
     renderer.shadowMap.enabled = !!gameSettings.shadows;
+    renderer.shadowMap.autoUpdate = false;
   }
 
   // 2. ปรับเงาตกกระทบ (Shadows)
   if (dirLight) {
     dirLight.castShadow = !!gameSettings.shadows;
+    if (dirLight.shadow) dirLight.shadow.autoUpdate = false;
+    if (gameSettings.shadows && renderer && dirLight.shadow) {
+      renderer.shadowMap.needsUpdate = true;
+      dirLight.shadow.needsUpdate = true;
+    }
     if (gameSettings.shadows && dirLight.shadow && dirLight.shadow.mapSize) {
       const sz = gameSettings.shadowMapSize || 1024;
       if (dirLight.shadow.mapSize.width !== sz) {
@@ -250,9 +271,7 @@ export function applyGraphicsSettingsToEngine(ctx) {
   }
 
   // 5. ปิดพาร์ติเคิลสภาพอากาศหากตั้งค่าไว้
-  if (weatherParticles && !gameSettings.weatherParticles) {
-    weatherParticles.visible = false;
-  }
+  if (weatherParticles) weatherParticles.visible = !!gameSettings.weatherParticles;
 
   // บันทึกค่าระยะฟิสิกส์ไว้ที่ window เพื่อให้ models.js เรียกเช็คระยะได้ทันที
   window.__AETHEL_PHYSICS_DIST_SQ = Math.pow(gameSettings.physicsCullDist || 26, 2);
@@ -262,8 +281,11 @@ export function applyGraphicsSettingsToEngine(ctx) {
 // 3. ระบบ Culling & Chunk Hibernation อัปเดตในเกมลูป (ลดแลค 100%)
 // ============================================================================
 let _cullTimer = 0;
+let _chunkGenerationAccumulator = 0;
 let _fpsFrames = 0;
 let _fpsAccum = 0;
+let _visibleChunkKeys = new Set();
+const _campfireWorldPosition = new THREE.Vector3();
 export let currentFPS = 60;
 
 export function updatePerformanceOptimization(dt, ctx) {
@@ -291,7 +313,7 @@ export function updatePerformanceOptimization(dt, ctx) {
     const fpsBadge = document.getElementById('fps-counter-badge');
     if (fpsBadge) {
       fpsBadge.style.display = gameSettings.showFPS ? 'flex' : 'none';
-      const activeChunks = Array.from(chunkMap.values()).filter((g) => g.visible).length;
+      const activeChunks = _visibleChunkKeys.size;
       const totalSaved = Math.max(chunkMap.size, worldCache.exploredSet.size);
       const colorClass = currentFPS >= 50 ? 'text-emerald-300' : currentFPS >= 30 ? 'text-amber-300' : 'text-rose-400';
       fpsBadge.innerHTML = `<span class="${colorClass} font-extrabold">${currentFPS} FPS</span> <span class="text-slate-400">|</span> <span class="text-sky-200">แมพ: ${activeChunks}/${totalSaved} Chunks</span>`;
@@ -301,20 +323,32 @@ export function updatePerformanceOptimization(dt, ctx) {
   if (!playerPos) return;
   window.__AETHEL_PLAYER_POS = playerPos;
 
-  // เจนเฉพาะ Chunk ที่อยู่ในรัศมี chunkRadius รอบตัวผู้เล่น (สร้าง 1 Chunk ต่อเฟรมเพื่อป้องกันอาการกระตุกค้าง)
+  // Generate the nearest missing chunk on a short interval to spread terrain work across frames.
   const curCx = Math.round(playerPos.x / CHUNK_SIZE);
   const curCz = Math.round(playerPos.z / CHUNK_SIZE);
   const R = gameSettings.chunkRadius;
-  let generatedThisFrame = 0;
-
-  for (let dx = -R; dx <= R; dx++) {
-    for (let dz = -R; dz <= R; dz++) {
-      const key = `${curCx + dx},${curCz + dz}`;
-      if (!chunkMap.has(key) && generatedThisFrame < 1) {
-        generateChunk(curCx + dx, curCz + dz);
-        generatedThisFrame++;
+  _chunkGenerationAccumulator += dt;
+  const chunkGenerationInterval = gameSettings.preset === 'potato'
+    ? 0.18
+    : gameSettings.preset === 'low' ? 0.14 : 0.12;
+  if (_chunkGenerationAccumulator >= chunkGenerationInterval) {
+    for (let ring = 0; ring <= R; ring++) {
+      let generated = false;
+      for (let dx = -ring; dx <= ring && !generated; dx++) {
+        for (let dz = -ring; dz <= ring; dz++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== ring) continue;
+          const cx = curCx + dx;
+          const cz = curCz + dz;
+          if (!chunkMap.has(`${cx},${cz}`)) {
+            generateChunk(cx, cz);
+            generated = true;
+            break;
+          }
+        }
       }
+      if (generated) break;
     }
+    _chunkGenerationAccumulator = 0;
   }
 
   // รันการตรวจสอบซ่อน/แสดงผล (Culling) ทุกๆ 0.20 วินาที (ไม่จำเป็นต้องเช็คทุกเฟรมให้เปลือง CPU)
@@ -322,17 +356,21 @@ export function updatePerformanceOptimization(dt, ctx) {
   if (_cullTimer < 0.20) return;
   _cullTimer = 0;
 
-  // 1. ซ่อน Chunk ที่อยู่นอกระยะมองเห็น (Hibernation) และเปิดแสดงเฉพาะ Chunk ที่อยู่ใกล้
-  chunkMap.forEach((chunkGroup, key) => {
-    const [cxStr, czStr] = key.split(',');
-    const cx = Number(cxStr);
-    const cz = Number(czStr);
-    const distChunks = Math.max(Math.abs(cx - curCx), Math.abs(cz - curCz));
-    const shouldBeVisible = distChunks <= R;
-    if (chunkGroup.visible !== shouldBeVisible) {
-      chunkGroup.visible = shouldBeVisible;
+  // Only revisit the bounded active neighborhood and chunks that were visible last pass.
+  for (const key of _visibleChunkKeys) {
+    const chunkGroup = chunkMap.get(key);
+    if (chunkGroup) chunkGroup.visible = false;
+  }
+  _visibleChunkKeys.clear();
+  for (let dx = -R; dx <= R; dx++) {
+    for (let dz = -R; dz <= R; dz++) {
+      const key = `${curCx + dx},${curCz + dz}`;
+      const chunkGroup = chunkMap.get(key);
+      if (!chunkGroup) continue;
+      chunkGroup.visible = true;
+      _visibleChunkKeys.add(key);
     }
-  });
+  }
 
   const cullDist = gameSettings.entityCullDist;
   const cullDistSq = cullDist * cullDist;
@@ -421,12 +459,12 @@ export function updatePerformanceOptimization(dt, ctx) {
   for (let i = 0; i < animatedCampfires.length; i++) {
     const cf = animatedCampfires[i];
     if (!cf.group) continue;
-    const worldPos = new THREE.Vector3();
-    cf.group.getWorldPosition(worldPos);
-    const dx = worldPos.x - playerPos.x;
-    const dz = worldPos.z - playerPos.z;
+    cf.group.getWorldPosition(_campfireWorldPosition);
+    const dx = _campfireWorldPosition.x - playerPos.x;
+    const dz = _campfireWorldPosition.z - playerPos.z;
     const inRange = (dx * dx + dz * dz) <= cullDistSq;
-    cf.group.visible = inRange;
+    cf._culled = !inRange;
+    if (cf.group.visible !== inRange) cf.group.visible = inRange;
   }
 }
 

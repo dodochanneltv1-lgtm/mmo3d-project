@@ -1,0 +1,115 @@
+// ==================== ไฟล์ใหม่ที่แก้ไขแล้ว: sky.js ====================
+import * as THREE from 'three';
+
+let cloudInstancedMesh = null;
+let starPoints = null;
+let celestialDisc = null;
+const cloudData = [];
+const CLOUD_COUNT = 120; // ลดจำนวนลงเล็กน้อยเพื่อความเสถียร 60 FPS
+const _dummy = new THREE.Object3D();
+
+export function initDynamicSkyAndClouds(scene) {
+  if (cloudInstancedMesh) return;
+
+  // 1. สร้างเมฆ 3D ปุยอนิเมะด้วย InstancedMesh (1 Draw Call ไม่กินสเปค)
+  const puffGeo = new THREE.DodecahedronGeometry(14, 1);
+  puffGeo.scale(2.2, 0.55, 1.4);
+  const puffMat = new THREE.MeshLambertMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.75,
+    depthWrite: false
+  });
+
+  cloudInstancedMesh = new THREE.InstancedMesh(puffGeo, puffMat, CLOUD_COUNT);
+  cloudInstancedMesh.castShadow = false;
+  cloudInstancedMesh.receiveShadow = false;
+  cloudInstancedMesh.frustumCulled = false;
+
+  let idx = 0;
+  for (let c = 0; c < 24; c++) {
+    const baseX = (Math.random() - 0.5) * 800;
+    const baseZ = (Math.random() - 0.5) * 800;
+    const baseY = 85 + Math.random() * 35;
+    const speed = 1.8 + Math.random() * 2.2;
+
+    for (let p = 0; p < 5; p++) {
+      if (idx >= CLOUD_COUNT) break;
+      const ox = (Math.random() - 0.5) * 28;
+      const oy = (Math.random() - 0.5) * 4;
+      const oz = (Math.random() - 0.5) * 20;
+      const sc = 0.7 + Math.random() * 0.8;
+      cloudData.push({ baseX, baseY, baseZ, ox, oy, oz, sc, speed });
+      idx++;
+    }
+  }
+  scene.add(cloudInstancedMesh);
+
+  // 2. สร้างดวงอาทิตย์ / ดวงจันทร์ (ขนาดพอดี ไม่บังจอ)
+  celestialDisc = new THREE.Mesh(
+    new THREE.SphereGeometry(12, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0xfffbeb })
+  );
+  scene.add(celestialDisc);
+
+  // 3. สร้างหมู่ดาวระยิบระยับตอนกลางคืน
+  const starGeo = new THREE.BufferGeometry();
+  const starCount = 400;
+  const starPos = new Float32Array(starCount * 3);
+  for (let i = 0; i < starCount; i++) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.random() * Math.PI * 0.45;
+    const r = 420;
+    starPos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+    starPos[i * 3 + 1] = r * Math.cos(phi) + 30;
+    starPos[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+  }
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  starPoints = new THREE.Points(
+    starGeo,
+    new THREE.PointsMaterial({ color: 0xe0f2fe, size: 1.4, transparent: true, opacity: 0 })
+  );
+  scene.add(starPoints);
+}
+
+export function updateDynamicSkyAndClouds(elapsedTime, playerPos, dayFactor = 1.0, sunsetFactor = 0.0, sunPosition = null) {
+  if (!cloudInstancedMesh) return;
+
+  // ปรับสีเมฆตามช่วงเวลาวัน-คืนอย่างนุ่มนวล
+  const cloudColor = new THREE.Color(0xffffff);
+  if (sunsetFactor > 0.2) {
+    cloudColor.lerp(new THREE.Color(0xfb923c), sunsetFactor * 0.7);
+  }
+  if (dayFactor < 0.4) {
+    cloudColor.lerp(new THREE.Color(0x475569), (0.4 - dayFactor) * 1.5);
+  }
+  cloudInstancedMesh.material.color.copy(cloudColor);
+
+  // เคลื่อนย้ายเมฆตามสายลมรอบตัวผู้เล่น
+  for (let i = 0; i < cloudData.length; i++) {
+    const cd = cloudData[i];
+    let wx = ((cd.baseX + elapsedTime * cd.speed - playerPos.x) % 800);
+    if (wx > 400) wx -= 800;
+    if (wx < -400) wx += 800;
+
+    let wz = ((cd.baseZ - playerPos.z) % 800);
+    if (wz > 400) wz -= 800;
+    if (wz < -400) wz += 800;
+
+    _dummy.position.set(playerPos.x + wx + cd.ox, cd.baseY + cd.oy, playerPos.z + wz + cd.oz);
+    _dummy.scale.setScalar(cd.sc);
+    _dummy.updateMatrix();
+    cloudInstancedMesh.setMatrixAt(i, _dummy.matrix);
+  }
+  cloudInstancedMesh.instanceMatrix.needsUpdate = true;
+
+  if (celestialDisc && sunPosition) {
+    celestialDisc.position.copy(sunPosition);
+    celestialDisc.material.color.setHex(dayFactor > 0.3 ? 0xfef08a : 0x93c5fd);
+  }
+  if (starPoints) {
+    starPoints.position.set(playerPos.x, 0, playerPos.z);
+    starPoints.material.opacity = THREE.MathUtils.clamp((0.35 - dayFactor) * 2.5, 0, 0.85);
+    starPoints.rotation.y = elapsedTime * 0.008;
+  }
+}

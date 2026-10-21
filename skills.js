@@ -14,6 +14,7 @@ export class SoundEngine {
     this.enabled = true;
     this.bgmTimer = null;
     this.noiseBuffer = null;
+    this.assetCache = new Map();
   }
 
   init() {
@@ -121,6 +122,48 @@ export class SoundEngine {
     this.playTone(1480, 'sine', 0.06, 0.06, 820);
   }
 
+  playAsset(path) {
+    if (!this.enabled) return;
+    let audio = this.assetCache.get(path);
+    if (!audio) {
+      audio = new Audio(path);
+      audio.preload = 'auto';
+      this.assetCache.set(path, audio);
+    }
+    const playback = audio.cloneNode();
+    playback.volume = 0.7;
+    playback.currentTime = 0;
+    playback.play().catch(error => console.warn(`Unable to play audio asset "${path}":`, error));
+  }
+
+  sfxPunch(step) {
+    const files = ['punch-attack1.mp3', 'punch-attack2.mp3', 'punch-attack3.mp3', 'punch-attack4.mp3'];
+    this.playAsset(`./sound/effect/fighting/punch/${files[(step - 1) % files.length]}`);
+  }
+
+  sfxPunchSkill() {
+    this.playAsset('./sound/effect/fighting/punch/punch-skill.mp3');
+  }
+
+  sfxPunchUltimate(finalHit = false) {
+    this.playAsset(finalHit
+      ? './sound/effect/fighting/punch/punch-ultimat-final%20attack.mp3'
+      : './sound/effect/fighting/punch/punch-ultimate-hit%20target.mp3');
+  }
+
+  sfxSwordAttack(step) {
+    const files = ['sword-attack1.mp3', 'sword-attack2.mp3', 'sword-attack3.mp3'];
+    this.playAsset(`./sound/effect/fighting/sword/${files[(step - 1) % files.length]}`);
+  }
+
+  sfxSwordWave() {
+    this.playAsset('./sound/effect/fighting/sword/sword-skill-wave.mp3');
+  }
+
+  sfxSwordUltimate() {
+    this.playAsset('./sound/effect/fighting/sword/sword-ultimat-hit.mp3');
+  }
+
   sfxHarvest() {
     // เสียงอีเตอร์ขุดแร่คริสตัล/ตัดไม้กังวาน
     this.playTone(1240, 'triangle', 0.12, 0.12, 1680);
@@ -170,63 +213,73 @@ export class SoundEngine {
 }
 
 export const CLASSES = {
+  fighter: {
+    id: 'fighter', name: 'นักสู้มือเปล่า (Fighter)', allowedWeapon: 'gloves', defaultWeapon: 'gloves_brawler',
+    desc: 'ต่อยคอมโบ 4 จังหวะ ชกรัว 10 ครั้ง และพุ่งโจมตีเป็นรูปดาวด้วยอัลติเมท',
+    stats: { hp: 190, mp: 90, atk: 30, matk: 8, def: 18, spd: 15 },
+    skills: {
+      active: { name: 'หมัดพายุ 10 จังหวะ', icon: '🥊', mp: 22, cd: 10, mult: 0.72, color: 0xf97316 },
+      passive: { name: 'นักสู้ (สะสมขั้นจากสกิล)', icon: '🔥' },
+      ult: { name: 'ดาวตกหมัดสุริยัน', icon: '🌟', mp: 40, cd: 18, mult: 2.0, color: 0xfb7185 }
+    }
+  },
   swordsman: {
     id: 'swordsman', name: 'นักดาบ (Swordsman)', allowedWeapon: 'sword', defaultWeapon: 'sword_iron',
-    desc: 'ฟันคลื่นดาบจันทร์เสี้ยวพุ่งผ่าศัตรู และอัญเชิญดาบยักษ์ Excalibur ผ่าลงมาจากฟากฟ้า',
+    desc: 'โจมตีปกติ 3 จังหวะ สะสมจิตวิญญาณนักดาบจากทุกฮิตและเพิ่มอีก 2 ขั้นในคอมโบที่ 3',
     stats: { hp: 170, mp: 65, atk: 26, matk: 8, def: 16, spd: 12 },
     skills: {
-      active: { name: 'คลื่นดาบจันทร์เสี้ยว', icon: '🌙', mp: 15, cd: 3.5, mult: 2.2, color: 0xf59e0b },
-      passive: { name: 'กายาเหล็กไหล (+20% DEF)', icon: '🛡️' },
-      ult: { name: 'ศาสตราเทวะผ่าสวรรค์', icon: '🗡️', mp: 35, cd: 9, mult: 4.0, color: 0xef4444 }
+      active: { name: 'คลื่นดาบจันทร์เสี้ยว', icon: '🌙', mp: 15, cd: 5, mult: 2.2, color: 0xf59e0b },
+      passive: { name: 'จิตวิญญาณนักดาบ (สะสมขั้น)', icon: '⚔️' },
+      ult: { name: 'ดาบสังหารต่อเนื่อง', icon: '🗡️', mp: 35, cd: 18, mult: 1.3, color: 0xef4444 }
     }
   },
   mage: {
     id: 'mage', name: 'นักเวท (Mage)', allowedWeapon: 'staff', defaultWeapon: 'staff_oak',
-    desc: 'ยิงลูกไฟเวทมนตร์ติดตามเป้าหมาย และอัญเชิญอุกกาบาตหินไฟยักษ์พุ่งชนพื้นโลก',
+    desc: 'สลับธาตุทั้ง 7 เพื่อสร้างปฏิกิริยาธาตุ และบินได้โดยใช้มานา',
     stats: { hp: 110, mp: 150, atk: 8, matk: 34, def: 8, spd: 11 },
     skills: {
-      active: { name: 'ศรเพลิงอาร์เคน', icon: '🔮', mp: 18, cd: 3.0, mult: 2.5, color: 0x38bdf8 },
-      passive: { name: 'กระแสเวทไม่สิ้นสุด', icon: '✨' },
+      active: { name: 'เปลี่ยนธาตุ', icon: '🔥', mp: 12, cd: 3.0, mult: 2.5, color: 0x38bdf8 },
+      passive: { name: 'โบยบินด้วยพลังมานา', icon: '🪽' },
       ult: { name: 'มหาอุกกาบาตถล่มปฐพี', icon: '☄️', mp: 45, cd: 11, mult: 4.8, color: 0xa855f7 }
     }
   },
   support: {
     id: 'support', name: 'ซัพพอร์ท (Support)', allowedWeapon: 'tome', defaultWeapon: 'tome_holy',
-    desc: 'สร้างเสาแสงฟื้นฟูพลังชีวิตพร้อมชำระล้างศัตรู และกางโดมวิหารศักดิ์สิทธิ์',
+    desc: 'รักษาเพื่อนที่อยู่ใกล้ และสร้างเขตรักษาฟื้นฟูทีม 5% HP ต่อวินาที',
     stats: { hp: 140, mp: 140, atk: 10, matk: 26, def: 14, spd: 12 },
     skills: {
-      active: { name: 'เสาแสงศักดิ์สิทธิ์ฟื้นฟู', icon: '💖', mp: 20, cd: 4.5, mult: 1.9, heal: 55, color: 0x34d399 },
-      passive: { name: 'พรแห่งทวยเทพ', icon: '🌿' },
-      ult: { name: 'มหาวิหารสวรรค์พิพากษา', icon: '🌟', mp: 40, cd: 10, mult: 3.5, heal: 110, color: 0xfde047 }
+      active: { name: 'รักษาเป้าหมาย', icon: '💖', mp: 18, cd: 5, mult: 1.9, heal: 0, color: 0x34d399 },
+      passive: { name: 'พลังฟื้นฟู (ดูดเลือด 10%)', icon: '🌿' },
+      ult: { name: 'เขตรักษาศักดิ์สิทธิ์', icon: '🌟', mp: 40, cd: 20, mult: 0, heal: 0, color: 0xfde047 }
     }
   },
   tank: {
     id: 'tank', name: 'แทงค์ (Tank)', allowedWeapon: 'shield', defaultWeapon: 'shield_knight',
-    desc: 'กระแทกโล่สร้างหนามศิลาผุดจากพื้น และอัญเชิญเสาป้อมปราการทองคำ 6 ทิศ',
+    desc: 'ทุบพื้นสตันศัตรู พร้อมสร้างโล่พลังงานให้ทีมและใช้มานาป้องกันเมื่อตกอยู่ในอันตราย',
     stats: { hp: 240, mp: 65, atk: 19, matk: 6, def: 30, spd: 10 },
     skills: {
-      active: { name: 'ศิลาปฐพีสะท้านภพ', icon: '🛡️', mp: 15, cd: 3.8, mult: 2.1, color: 0x60a5fa },
-      passive: { name: 'ปราการอมตะ (-30% DMG)', icon: '🏰' },
-      ult: { name: 'ค่ายกลปราการทองคำ', icon: '🌋', mp: 35, cd: 10, mult: 3.6, color: 0xfbbf24 }
+      active: { name: 'ค้อนสะเทือนปฐพี', icon: '🔨', mp: 18, cd: 8, mult: 2.1, color: 0x60a5fa },
+      passive: { name: 'มานารับความเสียหายเมื่อใกล้ตาย', icon: '🏰' },
+      ult: { name: 'โล่พิทักษ์ทีม', icon: '🛡️', mp: 35, cd: 25, mult: 0, color: 0xfbbf24 }
     }
   },
   archer: {
     id: 'archer', name: 'อาร์เชอร์ (Archer)', allowedWeapon: 'bow', defaultWeapon: 'bow_hunter',
-    desc: 'ยิงลูกธนูสายลมความเร็วสูง และโปรยห่าฝนศรแสงนับสิบดอกลงมาจากท้องฟ้า',
+    desc: 'ชาร์จยิงธนู ฝนธนู และ Unlimited Blade Works พร้อมความเร็วเคลื่อนที่เพิ่ม 25%',
     stats: { hp: 120, mp: 85, atk: 29, matk: 10, def: 10, spd: 15 },
     skills: {
-      active: { name: 'ศรทะลวงพายุ', icon: '🏹', mp: 15, cd: 2.8, mult: 2.4, color: 0x4ade80 },
+      active: { name: 'ฝนธนู', icon: '🏹', mp: 15, cd: 7, mult: 2.4, color: 0x4ade80 },
       passive: { name: 'สายลมกรด (+SPD)', icon: '🍃' },
-      ult: { name: 'พิรุณศรสวรรค์สังหาร', icon: '⚡', mp: 35, cd: 8.5, mult: 4.2, color: 0x22d3ee }
+      ult: { name: 'Unlimited Blade Works', icon: '⚔️', mp: 35, cd: 20, mult: 4.2, color: 0x22d3ee }
     }
   },
   classless: {
     id: 'classless', name: 'ไร้อาชีพ (Classless)', allowedWeapon: 'any', defaultWeapon: 'sword_iron',
-    desc: 'ไม่มีบัพสเตตัสเริ่มต้น แต่ใช้อาวุธได้ทุกชนิด และอัญเชิญศาสตราจำลองหมุนรอบตัวโจมตี!',
+    desc: 'ใช้อาวุธและสกิลตามอาวุธที่สวมใส่ได้ทุกชนิด แต่ไม่มีพาสซีฟของอาชีพ',
     stats: { hp: 100, mp: 50, atk: 10, matk: 10, def: 10, spd: 12 },
     skills: {
       active: { name: 'ศาสตราไร้ลักษณ์พุ่งชน', icon: '🌀', mp: 12, cd: 2.8, mult: 2.3, color: 0xe879f9 },
-      passive: { name: 'ศาสตราจารย์ร้อยอาวุธ', icon: '♾️' },
+      passive: { name: 'ไม่มีพาสซีฟอาชีพ', icon: '🚫' },
       ult: { name: 'คลังศาสตราจักรพรรดิ', icon: '🌌', mp: 30, cd: 7.5, mult: 4.4, color: 0xf43f5e }
     }
   }
@@ -251,7 +304,53 @@ export class SkillFXManager {
     const dir = new THREE.Vector3(Math.sin(forwardAngle), 0, Math.cos(forwardAngle));
     const dest = targetPos ? targetPos.clone() : startPos.clone().addScaledVector(dir, 6);
 
-    if (classId === 'swordsman') {
+    if (classId === 'fighter') {
+      if (isUlt) {
+        const star = new THREE.Group();
+        const color = 0xfb7185;
+        const radius = 5;
+        const rotation = Math.atan2(startPos.x - dest.x, startPos.z - dest.z);
+        const vertices = Array.from({ length: 5 }, (_, index) => {
+          const angle = rotation + index * Math.PI * 2 / 5;
+          return new THREE.Vector3(
+            dest.x + Math.sin(angle) * radius,
+            dest.y + 0.12,
+            dest.z + Math.cos(angle) * radius
+          );
+        });
+        const starPath = [0, 2, 4, 1, 3, 0].map(index => vertices[index]);
+        const line = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(starPath),
+          new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95 })
+        );
+        star.add(line);
+        vertices.forEach(vertex => {
+          const spark = new THREE.Mesh(
+            new THREE.SphereGeometry(0.14, 8, 6),
+            new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95 })
+          );
+          spark.position.copy(vertex);
+          star.add(spark);
+        });
+        this.worldGroup.add(star);
+        this.activeFX.push({ type: 'star_path', mesh: star, age: 0, maxAge: 1.55 });
+      } else {
+        const strikeRing = new THREE.Group();
+        for (let i = 0; i < 10; i++) {
+          const angle = (i / 10) * Math.PI * 2;
+          const pulse = new THREE.Mesh(
+            new THREE.TorusGeometry(1.0, 0.045, 6, 18),
+            new THREE.MeshBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.8 })
+          );
+          pulse.position.set(Math.cos(angle) * 0.28, 0.5 + i * 0.08, Math.sin(angle) * 0.28);
+          pulse.rotation.x = Math.PI / 2;
+          strikeRing.add(pulse);
+        }
+        strikeRing.position.copy(startPos);
+        this.worldGroup.add(strikeRing);
+        this.activeFX.push({ type: 'blade_vortex', mesh: strikeRing, age: 0, maxAge: 0.8 });
+      }
+    } else if (classId === 'swordsman') {
       if (!isUlt) {
         const crescent = new THREE.Mesh(
           new THREE.TorusGeometry(1.3, 0.12, 8, 24, Math.PI),
@@ -292,20 +391,33 @@ export class SkillFXManager {
       }
     } else if (classId === 'archer') {
       if (!isUlt) {
-        [-0.2, 0, 0.2].forEach(offsetAng => {
-          const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.12, 1.2, 8), new THREE.MeshBasicMaterial({ color: 0x4ade80 }));
-          arrow.rotation.x = Math.PI / 2;
-          arrow.position.copy(startPos).add(new THREE.Vector3(0, 1.2, 0));
-          const aDir = new THREE.Vector3(Math.sin(forwardAngle + offsetAng), 0, Math.cos(forwardAngle + offsetAng));
-          this.worldGroup.add(arrow);
-          this.activeFX.push({ type: 'projectile', mesh: arrow, vel: aDir.multiplyScalar(26), age: 0, maxAge: 0.55 });
-        });
+        const arrowRain = new THREE.Group();
+        for (let i = 0; i < 24; i++) {
+          const arrow = new THREE.Mesh(
+            new THREE.ConeGeometry(0.08, 1.2, 6),
+            new THREE.MeshBasicMaterial({ color: 0x4ade80 })
+          );
+          arrow.position.set((Math.random() - 0.5) * 10, 5 + Math.random() * 4, (Math.random() - 0.5) * 10);
+          arrow.rotation.x = Math.PI;
+          arrowRain.add(arrow);
+        }
+        arrowRain.position.copy(dest);
+        this.worldGroup.add(arrowRain);
+        this.activeFX.push({ type: 'arrow_rain', mesh: arrowRain, age: 0, maxAge: 0.9 });
       } else {
         const rainGroup = new THREE.Group();
         for (let i = 0; i < 18; i++) {
-          const arr = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.8, 6), new THREE.MeshBasicMaterial({ color: 0x22d3ee }));
-          arr.position.set((Math.random() - 0.5) * 6, 8 + Math.random() * 6, (Math.random() - 0.5) * 6);
-          rainGroup.add(arr);
+          const sword = new THREE.Group();
+          const blade = new THREE.Mesh(new THREE.BoxGeometry(0.10, 1.65, 0.055), new THREE.MeshBasicMaterial({ color: 0x67e8f9 }));
+          blade.position.y = 0.55;
+          const guard = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.09, 0.10), new THREE.MeshBasicMaterial({ color: 0xfbbf24 }));
+          guard.position.y = -0.26;
+          const grip = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.42, 0.08), new THREE.MeshBasicMaterial({ color: 0x475569 }));
+          grip.position.y = -0.5;
+          sword.add(blade, guard, grip);
+          sword.position.set((Math.random() - 0.5) * 12, 8 + Math.random() * 6, (Math.random() - 0.5) * 12);
+          sword.rotation.z = Math.PI;
+          rainGroup.add(sword);
         }
         rainGroup.position.copy(dest);
         this.worldGroup.add(rainGroup);
@@ -373,6 +485,11 @@ export class SkillFXManager {
       } else if (fx.type === 'blade_vortex') {
         fx.mesh.rotation.y += dt * 10;
         fx.mesh.scale.setScalar(1 + p * 0.8);
+      } else if (fx.type === 'star_path') {
+        fx.mesh.scale.setScalar(1 + Math.sin(p * Math.PI) * 0.08);
+        fx.mesh.traverse(object => {
+          if (object.material?.transparent) object.material.opacity = 0.95 * (1 - p);
+        });
       }
 
       if (fx.age >= fx.maxAge) {

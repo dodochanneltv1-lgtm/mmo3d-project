@@ -2,10 +2,10 @@ import * as THREE from 'three';
 import { createAnimeMaterial, getVolumetricMistTexture, getSoftGlowTexture } from './shaders.js';
 
 export const TOWNS = [
-  { id: 0, style: 'capital', name: 'มหานครเอเธลการ์ด (Aethelgard Capital)', x: 0, z: 0, radius: 96, themeColor: 0xf59e0b, roofColor: 0xb91c1c, groundColor: 0xe7e5e4 },
-  { id: 1, style: 'elven',   name: 'นครพงไพรซิลแวนเวล (Sylvanvale Sanctuary)', x: -260, z: -260, radius: 88, themeColor: 0x10b981, roofColor: 0x047857, groundColor: 0xd1fae5 },
-  { id: 2, style: 'volcano', name: 'ป้อมปราการไพร์โฮลด์ (Pyrehold Bastion)', x: 260, z: -240, radius: 88, themeColor: 0xf97316, roofColor: 0x7c2d12, groundColor: 0xfed7aa },
-  { id: 3, style: 'frost',   name: 'เมืองท่าฟรอสต์เฮเวน (Frosthaven Citadel)', x: -240, z: 260, radius: 88, themeColor: 0x38bdf8, roofColor: 0x1d4ed8, groundColor: 0xe0f2fe }
+  { id: 0, style: 'capital', name: 'มหานครเอเธลการ์ด (Aethelgard Capital)', x: 0, z: 0, radius: 124, themeColor: 0xf59e0b, roofColor: 0xb91c1c, groundColor: 0xe7e5e4 },
+  { id: 1, style: 'elven',   name: 'นครพงไพรซิลแวนเวล (Sylvanvale Sanctuary)', x: -260, z: -260, radius: 124, themeColor: 0x10b981, roofColor: 0x047857, groundColor: 0xd1fae5 },
+  { id: 2, style: 'volcano', name: 'ป้อมปราการไพร์โฮลด์ (Pyrehold Bastion)', x: 260, z: -240, radius: 124, themeColor: 0xf97316, roofColor: 0x7c2d12, groundColor: 0xfed7aa },
+  { id: 3, style: 'frost',   name: 'เมืองท่าฟรอสต์เฮเวน (Frosthaven Citadel)', x: -240, z: 260, radius: 124, themeColor: 0x38bdf8, roofColor: 0x1d4ed8, groundColor: 0xe0f2fe }
 ];
 
 export const FARM_MATERIALS = {
@@ -167,55 +167,136 @@ export function registerBoxCollider(worldColliders, cx, cz, width, depth, topY, 
   return col;
 }
 
+const COLLISION_CELL_SIZE = 24;
+const collisionGrids = new WeakMap();
+const collisionQueries = new WeakMap();
+let collisionQueryId = 0;
+
+function getCollisionGrid(worldColliders) {
+  let grid = collisionGrids.get(worldColliders);
+  if (!grid) {
+    grid = { cells: new Map(), indexedCount: 0 };
+    collisionGrids.set(worldColliders, grid);
+  }
+
+  while (grid.indexedCount < worldColliders.length) {
+    const col = worldColliders[grid.indexedCount++];
+    let minX, maxX, minZ, maxZ;
+    if (col.type === 'box') {
+      minX = col.minX;
+      maxX = col.maxX;
+      minZ = col.minZ;
+      maxZ = col.maxZ;
+    } else {
+      const radius = Math.max(0, col.radius || 0);
+      minX = col.x - radius;
+      maxX = col.x + radius;
+      minZ = col.z - radius;
+      maxZ = col.z + radius;
+    }
+
+    const minCellX = Math.floor(minX / COLLISION_CELL_SIZE);
+    const maxCellX = Math.floor(maxX / COLLISION_CELL_SIZE);
+    const minCellZ = Math.floor(minZ / COLLISION_CELL_SIZE);
+    const maxCellZ = Math.floor(maxZ / COLLISION_CELL_SIZE);
+    for (let cellX = minCellX; cellX <= maxCellX; cellX++) {
+      for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
+        const key = `${cellX},${cellZ}`;
+        let cell = grid.cells.get(key);
+        if (!cell) {
+          cell = [];
+          grid.cells.set(key, cell);
+        }
+        cell.push(col);
+      }
+    }
+  }
+  return grid;
+}
+
+export function forEachWorldColliderInBounds(worldColliders, minX, maxX, minZ, maxZ, callback) {
+  const grid = getCollisionGrid(worldColliders);
+  const queryId = ++collisionQueryId;
+  const minCellX = Math.floor(minX / COLLISION_CELL_SIZE);
+  const maxCellX = Math.floor(maxX / COLLISION_CELL_SIZE);
+  const minCellZ = Math.floor(minZ / COLLISION_CELL_SIZE);
+  const maxCellZ = Math.floor(maxZ / COLLISION_CELL_SIZE);
+
+  for (let cellX = minCellX; cellX <= maxCellX; cellX++) {
+    for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
+      const cell = grid.cells.get(`${cellX},${cellZ}`);
+      if (!cell) continue;
+      for (let i = 0; i < cell.length; i++) {
+        const col = cell[i];
+        if (collisionQueries.get(col) === queryId) continue;
+        collisionQueries.set(col, queryId);
+        callback(col);
+      }
+    }
+  }
+}
+
 export function resolveWorldCollisions(pPos, playerRadius, currentSupportY, worldColliders) {
   let supportY = currentSupportY;
+  const grid = getCollisionGrid(worldColliders);
+  const queryId = ++collisionQueryId;
+  const cellX = Math.floor(pPos.x / COLLISION_CELL_SIZE);
+  const cellZ = Math.floor(pPos.z / COLLISION_CELL_SIZE);
 
-  for (let i = 0; i < worldColliders.length; i++) {
-    const col = worldColliders[i];
-    if (col.disabled) continue;
-    if (col.minY !== undefined && pPos.y + 1.65 < col.minY) continue;
+  for (let offsetX = -1; offsetX <= 1; offsetX++) {
+    for (let offsetZ = -1; offsetZ <= 1; offsetZ++) {
+      const cell = grid.cells.get(`${cellX + offsetX},${cellZ + offsetZ}`);
+      if (!cell) continue;
+      for (let i = 0; i < cell.length; i++) {
+        const col = cell[i];
+        if (collisionQueries.get(col) === queryId) continue;
+        collisionQueries.set(col, queryId);
+        if (col.disabled) continue;
+        if (col.minY !== undefined && pPos.y + 1.65 < col.minY) continue;
 
-    if (col.type === 'box') {
-      const closestX = Math.max(col.minX, Math.min(pPos.x, col.maxX));
-      const closestZ = Math.max(col.minZ, Math.min(pPos.z, col.maxZ));
-      const dx = pPos.x - closestX;
-      const dz = pPos.z - closestZ;
-      const distSq = dx * dx + dz * dz;
+        if (col.type === 'box') {
+          const closestX = Math.max(col.minX, Math.min(pPos.x, col.maxX));
+          const closestZ = Math.max(col.minZ, Math.min(pPos.z, col.maxZ));
+          const dx = pPos.x - closestX;
+          const dz = pPos.z - closestZ;
+          const distSq = dx * dx + dz * dz;
 
-      if (distSq < playerRadius * playerRadius) {
-        if (col.stepable && pPos.y >= col.topY - 0.72) {
-          supportY = Math.max(supportY, col.topY);
-        } else if (pPos.y < col.topY - 0.05) {
-          const dist = Math.sqrt(distSq);
-          if (dist > 0.0001) {
-            const overlap = playerRadius - dist;
-            pPos.x += (dx / dist) * overlap;
-            pPos.z += (dz / dist) * overlap;
-          } else {
-            const dLeft = Math.abs(pPos.x - col.minX);
-            const dRight = Math.abs(col.maxX - pPos.x);
-            const dBack = Math.abs(pPos.z - col.minZ);
-            const dFront = Math.abs(col.maxZ - pPos.z);
-            const m = Math.min(dLeft, dRight, dBack, dFront);
-            if (m === dLeft) pPos.x = col.minX - playerRadius;
-            else if (m === dRight) pPos.x = col.maxX + playerRadius;
-            else if (m === dBack) pPos.z = col.minZ - playerRadius;
-            else pPos.z = col.maxZ + playerRadius;
+          if (distSq < playerRadius * playerRadius) {
+            if (col.stepable && pPos.y >= col.topY - 0.72) {
+              supportY = Math.max(supportY, col.topY);
+            } else if (pPos.y < col.topY - 0.05) {
+              const dist = Math.sqrt(distSq);
+              if (dist > 0.0001) {
+                const overlap = playerRadius - dist;
+                pPos.x += (dx / dist) * overlap;
+                pPos.z += (dz / dist) * overlap;
+              } else {
+                const dLeft = Math.abs(pPos.x - col.minX);
+                const dRight = Math.abs(col.maxX - pPos.x);
+                const dBack = Math.abs(pPos.z - col.minZ);
+                const dFront = Math.abs(col.maxZ - pPos.z);
+                const m = Math.min(dLeft, dRight, dBack, dFront);
+                if (m === dLeft) pPos.x = col.minX - playerRadius;
+                else if (m === dRight) pPos.x = col.maxX + playerRadius;
+                else if (m === dBack) pPos.z = col.minZ - playerRadius;
+                else pPos.z = col.maxZ + playerRadius;
+              }
+            }
           }
-        }
-      }
-    } else {
-      const dx = pPos.x - col.x;
-      const dz = pPos.z - col.z;
-      const dist = Math.hypot(dx, dz);
-      const minDist = col.radius + playerRadius;
-      if (dist < minDist && dist > 0.0001) {
-        if (col.stepable && pPos.y >= col.topY - 0.72) {
-          supportY = Math.max(supportY, col.topY);
-        } else if (pPos.y < col.topY - 0.05) {
-          const overlap = minDist - dist;
-          pPos.x += (dx / dist) * overlap;
-          pPos.z += (dz / dist) * overlap;
+        } else {
+          const dx = pPos.x - col.x;
+          const dz = pPos.z - col.z;
+          const dist = Math.hypot(dx, dz);
+          const minDist = col.radius + playerRadius;
+          if (dist < minDist && dist > 0.0001) {
+            if (col.stepable && pPos.y >= col.topY - 0.72) {
+              supportY = Math.max(supportY, col.topY);
+            } else if (pPos.y < col.topY - 0.05) {
+              const overlap = minDist - dist;
+              pPos.x += (dx / dist) * overlap;
+              pPos.z += (dz / dist) * overlap;
+            }
+          }
         }
       }
     }
@@ -295,12 +376,9 @@ export function createVolumetricCampfire(scale = 1.0, includeProps = true) {
     });
   }
 
-  let fireLight = null;
-  if (includeProps) {
-    fireLight = new THREE.PointLight(0xf97316, 2.2, 18, 1.5);
-    fireLight.position.set(0, 1.2, 0);
-    group.add(fireLight);
-  }
+  const fireLight = new THREE.PointLight(0xf97316, includeProps ? 2.2 : 1.2, 18, 1.5);
+  fireLight.position.set(0, 1.2, 0);
+  group.add(fireLight);
 
   // ใช้ Soft Radial Glow Texture แทนวงกลมทึบขอบแข็ง
   const softGlowTex = getSoftGlowTexture();
@@ -324,8 +402,9 @@ export function createVolumetricCampfire(scale = 1.0, includeProps = true) {
 }
 
 // ==================== 1.5 โคมไฟถนนโครงเหล็กดัดแฟนตาซี + แสงฟุ้งนุ่มนวล (แก้ปัญหาหลอดไฟไม่สวย!) ====================
-export function createOrnateStreetLamp(lx, ly, lz, rotY = 0, streetLampMaterials = [], streetLampGlowDiscs = []) {
+export function createOrnateStreetLamp(lx, ly, lz, rotY = 0, streetLampMaterials = [], streetLampGlowDiscs = [], streetLampPointLights = []) {
   const lampGroup = new THREE.Group();
+  lampGroup.userData.hasPhysicalGlow = true;
   lampGroup.position.set(lx, ly, lz);
   lampGroup.rotation.y = rotY;
 
@@ -379,6 +458,14 @@ export function createOrnateStreetLamp(lx, ly, lz, rotY = 0, streetLampMaterials
   botCap.rotation.x = Math.PI;
   botCap.position.y = -0.22;
   lanternCage.add(topCap, topRim, glassCore, botCap);
+
+  const pointLight = new THREE.PointLight(0xffd878, 28, 22, 1.5);
+  pointLight.position.set(0, 0, 0);
+  pointLight.visible = false;
+  pointLight.castShadow = false;
+  pointLight.userData.baseIntensity = 28;
+  streetLampPointLights.push(pointLight);
+  lanternCage.add(pointLight);
 
   // Halo แสงฟุ้งรอบตัวโคมไฟ (เพิ่มสเกลและความสว่าง)
   const softGlowTex = getSoftGlowTexture();
@@ -600,6 +687,7 @@ export function createDetailedTableAndChairs(wx, wy, wz, rotY = 0, interactiveSe
       wy: wy,
       wz: seatWorldZ,
       rotY: seatWorldRotY,
+      sitPelvisY: seatH + 0.04 + 0.02 + 0.12,
       mesh: chairG,
       label: opts.locationName || 'เก้าอี้ไม้'
     };
@@ -818,9 +906,9 @@ export function createMonsterMesh(type) {
     g.add(body, core);
     parts.body = body;
     parts.core = core;
-  } else if (type === 'goblin') {
-    const skinMat = createAnimeMaterial({ color: 0x4d7c0f, roughness: 0.55 });
-    const armorMat = createAnimeMaterial({ color: 0x78350f, roughness: 0.7 });
+  } else if (type === 'goblin' || type === 'bandit') {
+    const skinMat = createAnimeMaterial({ color: type === 'bandit' ? 0xd6a77a : 0x4d7c0f, roughness: 0.55 });
+    const armorMat = createAnimeMaterial({ color: type === 'bandit' ? 0x334155 : 0x78350f, roughness: 0.7 });
     const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.28, 0.68, 16), armorMat);
     torso.position.y = 0.88;
     const head = new THREE.Mesh(new THREE.SphereGeometry(0.34, 20, 20), skinMat);
@@ -851,8 +939,8 @@ export function createMonsterMesh(type) {
 
     g.add(torso, head, armL, armR, legL, legR);
     parts.torso = torso; parts.armL = armL; parts.armR = armR; parts.legL = legL; parts.legR = legR; parts.head = head;
-  } else if (type === 'wolf') {
-    const furMat = createAnimeMaterial({ color: 0x475569, roughness: 0.6 });
+  } else if (type === 'wolf' || type === 'direwolf') {
+    const furMat = createAnimeMaterial({ color: type === 'direwolf' ? 0x292524 : 0x475569, roughness: 0.6 });
     const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.36, 0.85, 12, 16), furMat);
     body.rotation.x = Math.PI / 2;
     body.position.y = 0.72;
@@ -870,7 +958,161 @@ export function createMonsterMesh(type) {
       legs.push(leg);
     });
     g.add(body, head, tail);
+    if (type === 'direwolf') {
+      g.scale.setScalar(1.35);
+      const eyes = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), new THREE.MeshBasicMaterial({ color: 0xf97316 }));
+      eyes.position.set(0, 1.08, 0.94);
+      g.add(eyes);
+    }
     parts.body = body; parts.head = head; parts.legs = legs; parts.tail = tail;
+  } else if (type === 'thornbeast') {
+    const barkMat = createAnimeMaterial({ color: 0x365314, roughness: 0.8 });
+    const thornMat = createAnimeMaterial({ color: 0xa3e635, roughness: 0.45 });
+    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.48, 0.7, 6, 10), barkMat);
+    torso.position.y = 1.25;
+    const head = new THREE.Mesh(new THREE.DodecahedronGeometry(0.42, 0), barkMat);
+    head.position.set(0, 2.08, 0.12);
+    const armL = new THREE.Mesh(new THREE.CapsuleGeometry(0.16, 0.68, 5, 8), barkMat);
+    const armR = armL.clone();
+    armL.position.set(-0.72, 1.34, 0);
+    armR.position.set(0.72, 1.34, 0);
+    const legL = new THREE.Mesh(new THREE.CapsuleGeometry(0.17, 0.54, 5, 8), barkMat);
+    const legR = legL.clone();
+    legL.position.set(-0.28, 0.42, 0);
+    legR.position.set(0.28, 0.42, 0);
+    const thorns = [];
+    for (let i = 0; i < 5; i++) {
+      const thorn = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.58, 6), thornMat);
+      thorn.position.set((i - 2) * 0.23, 1.55 + Math.abs(i - 2) * 0.08, -0.42);
+      thorn.rotation.x = -Math.PI / 2.6;
+      g.add(thorn);
+      thorns.push(thorn);
+    }
+    g.add(torso, head, armL, armR, legL, legR);
+    parts.torso = torso; parts.head = head; parts.armL = armL; parts.armR = armR;
+    parts.legL = legL; parts.legR = legR; parts.thorns = thorns;
+  } else if (type === 'frost_wraith') {
+    const iceMat = new THREE.MeshStandardMaterial({
+      color: 0x7dd3fc, emissive: 0x0284c7, emissiveIntensity: 0.8,
+      roughness: 0.22, metalness: 0.2, transparent: true, opacity: 0.82
+    });
+    const coreMat = new THREE.MeshBasicMaterial({ color: 0xe0f2fe });
+    const robe = new THREE.Mesh(new THREE.ConeGeometry(0.82, 2.2, 8), iceMat);
+    robe.position.y = 1.25;
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.42, 14, 12), iceMat);
+    head.position.y = 2.45;
+    const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.2, 1), coreMat);
+    core.position.set(0, 1.65, 0.48);
+    const arms = [-1, 1].map(side => {
+      const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.12, 0.65, 5, 8), iceMat);
+      arm.position.set(side * 0.64, 1.7, 0);
+      arm.rotation.z = side * -0.45;
+      g.add(arm);
+      return arm;
+    });
+    g.add(robe, head, core);
+    parts.torso = robe; parts.head = head; parts.core = core; parts.armL = arms[0]; parts.armR = arms[1];
+  } else if (type === 'infernal_drake' || type === 'boss_wyrm') {
+    const isBoss = type === 'boss_wyrm';
+    const scale = isBoss ? 2.8 : 1.45;
+    const hideMat = createAnimeMaterial({ color: isBoss ? 0x7f1d1d : 0xc2410c, roughness: 0.42, metalness: 0.18 });
+    const glowMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, emissive: 0xf97316, emissiveIntensity: 1.4 });
+    const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.48, 1.35, 8, 12), hideMat);
+    body.rotation.x = Math.PI / 2;
+    body.position.y = 1.38;
+    const head = new THREE.Mesh(new THREE.DodecahedronGeometry(0.52, 0), hideMat);
+    head.position.set(0, 1.68, 1.05);
+    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.32, 1.55, 8), hideMat);
+    tail.rotation.x = -Math.PI / 2;
+    tail.position.set(0, 1.18, -1.45);
+    const wingMat = new THREE.MeshStandardMaterial({
+      color: 0xef4444, emissive: 0x7f1d1d, emissiveIntensity: 0.35,
+      side: THREE.DoubleSide, transparent: true, opacity: 0.88
+    });
+    const wingL = new THREE.Mesh(new THREE.ConeGeometry(0.84, 2.15, 3), wingMat);
+    const wingR = wingL.clone();
+    wingL.position.set(-0.92, 1.95, -0.05);
+    wingR.position.set(0.92, 1.95, -0.05);
+    wingL.rotation.z = 0.48;
+    wingR.rotation.z = -0.48;
+    const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.32, 1), glowMat);
+    core.position.set(0, 1.4, 0.53);
+    const legs = [-1, 1].map(side => {
+      const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.16, 0.58, 5, 8), hideMat);
+      leg.position.set(side * 0.36, 0.45, 0.44);
+      g.add(leg);
+      return leg;
+    });
+    g.add(body, head, tail, wingL, wingR, core);
+    g.scale.setScalar(scale);
+    parts.body = body; parts.head = head; parts.tail = tail;
+    parts.wingL = wingL; parts.wingR = wingR; parts.core = core; parts.legs = legs;
+  } else if (type === 'void_knight' || type === 'boss_voidknight') {
+    const isBoss = type === 'boss_voidknight';
+    const armorMat = createAnimeMaterial({ color: 0x312e81, roughness: 0.28, metalness: 0.78 });
+    const glowMat = new THREE.MeshStandardMaterial({ color: 0xc4b5fd, emissive: 0x7c3aed, emissiveIntensity: 1.25 });
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.52, 0.72, 1.65, 8), armorMat);
+    torso.position.y = 1.45;
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.48, 12, 10), armorMat);
+    head.position.y = 2.58;
+    const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.25, 1), glowMat);
+    core.position.set(0, 1.55, 0.63);
+    const arms = [-1, 1].map(side => {
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.42, 1.25, 0.46), armorMat);
+      arm.position.set(side * 0.82, 1.42, 0);
+      g.add(arm);
+      return arm;
+    });
+    const legs = [-1, 1].map(side => {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.86, 0.5), armorMat);
+      leg.position.set(side * 0.38, 0.47, 0);
+      g.add(leg);
+      return leg;
+    });
+    const sword = new THREE.Mesh(new THREE.BoxGeometry(0.16, 2.45, 0.2), glowMat);
+    sword.position.set(1.16, 1.48, 0.3);
+    sword.rotation.z = -0.24;
+    g.add(torso, head, core, sword);
+    g.scale.setScalar(isBoss ? 2.45 : 1.25);
+    parts.torso = torso; parts.head = head; parts.core = core;
+    parts.armL = arms[0]; parts.armR = arms[1]; parts.legL = legs[0]; parts.legR = legs[1];
+  } else if (type === 'boss_treant') {
+    const barkMat = createAnimeMaterial({ color: 0x713f12, roughness: 0.86 });
+    const leafMat = new THREE.MeshStandardMaterial({ color: 0x4ade80, emissive: 0x166534, emissiveIntensity: 0.45 });
+    const coreMat = new THREE.MeshStandardMaterial({ color: 0xf0abfc, emissive: 0xc026d3, emissiveIntensity: 1.4 });
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 1.1, 3.3, 9), barkMat);
+    torso.position.y = 2.15;
+    const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.78, 0), barkMat);
+    head.position.y = 4.25;
+    const arms = [-1, 1].map(side => {
+      const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.42, 2.35, 7), barkMat);
+      arm.position.set(side * 1.52, 2.5, 0);
+      arm.rotation.z = side * -0.42;
+      g.add(arm);
+      return arm;
+    });
+    const legs = [-1, 1].map(side => {
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.48, 1.35, 7), barkMat);
+      leg.position.set(side * 0.55, 0.72, 0);
+      g.add(leg);
+      return leg;
+    });
+    const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.46, 1), coreMat);
+    core.position.set(0, 2.45, 0.92);
+    const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(1.05, 0), leafMat);
+    crown.position.set(0, 5.05, -0.04);
+    const branches = [-1, 1].map(side => {
+      const branch = new THREE.Mesh(new THREE.ConeGeometry(0.2, 1.1, 5), leafMat);
+      branch.position.set(side * 0.58, 4.95, 0);
+      branch.rotation.z = side * -0.55;
+      g.add(branch);
+      return branch;
+    });
+    g.add(torso, head, core, crown);
+    g.scale.setScalar(1.9);
+    parts.torso = torso; parts.head = head; parts.core = core;
+    parts.armL = arms[0]; parts.armR = arms[1]; parts.legL = legs[0]; parts.legR = legs[1];
+    parts.crown = crown; parts.branches = branches;
   } else {
     const rockMat = createAnimeMaterial({ color: 0x7f1d1d, metalness: 0.35, roughness: 0.45 });
     const runeMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, emissive: 0xf97316, emissiveIntensity: 0.65 });
@@ -909,7 +1151,7 @@ export function updateMonsterAnimation(mon, dt, elapsedTime, isMoving) {
     p.core.rotation.y += dt * 5;
     p.core.rotation.x += dt * 3;
     p.core.position.y = p.body.position.y;
-  } else if (mon.type === 'wolf') {
+  } else if (mon.type === 'wolf' || mon.type === 'direwolf') {
     const legAmp = isMoving ? 0.85 : 0.35;
     if (p.legs) {
       p.legs[0].rotation.x = Math.sin(t) * legAmp;
@@ -920,6 +1162,41 @@ export function updateMonsterAnimation(mon, dt, elapsedTime, isMoving) {
     if (p.body) p.body.position.y = 0.72 + Math.abs(Math.sin(t)) * 0.08;
     if (p.head) p.head.position.y = 1.02 + Math.sin(t * 2) * 0.06;
     if (p.tail) p.tail.rotation.z = Math.sin(t * 2.5) * 0.45;
+  } else if (mon.type === 'infernal_drake' || mon.type === 'boss_wyrm') {
+    const flap = Math.sin(t * 1.2) * (isMoving ? 0.68 : 0.35);
+    if (p.wingL) p.wingL.rotation.z = flap;
+    if (p.wingR) p.wingR.rotation.z = -flap;
+    if (p.tail) p.tail.rotation.x = -Math.PI / 2 + Math.sin(t * 0.7) * 0.16;
+    if (p.body) p.body.position.y = 1.38 + Math.sin(t * 1.6) * 0.09;
+    if (p.core) p.core.rotation.y += dt * 2.8;
+  } else if (mon.type === 'boss_treant') {
+    const sway = Math.sin(t * 0.55) * (isMoving ? 0.28 : 0.12);
+    if (p.armL) p.armL.rotation.z = -0.42 + sway;
+    if (p.armR) p.armR.rotation.z = 0.42 - sway;
+    if (p.torso) p.torso.rotation.z = sway * 0.22;
+    if (p.crown) p.crown.rotation.y += dt * 0.45;
+    if (p.core) p.core.rotation.y += dt * 2.4;
+  } else if (mon.type === 'boss_voidknight' || mon.type === 'void_knight') {
+    const swing = Math.sin(t) * (isMoving ? 0.48 : 0.18);
+    if (p.armL) p.armL.rotation.x = swing;
+    if (p.armR) p.armR.rotation.x = -swing - (mon.atkCooldown > 1.0 ? 0.35 : 0);
+    if (p.core) p.core.rotation.y += dt * 2.6;
+    if (p.head) p.head.rotation.y = Math.sin(t * 0.5) * 0.18;
+  } else if (mon.type === 'thornbeast') {
+    const swing = Math.sin(t) * (isMoving ? 0.7 : 0.3);
+    if (p.legL) p.legL.rotation.x = swing;
+    if (p.legR) p.legR.rotation.x = -swing;
+    if (p.armL) p.armL.rotation.x = -swing * 0.8;
+    if (p.armR) p.armR.rotation.x = swing * 0.8;
+    if (p.torso) p.torso.position.y = 1.25 + Math.abs(Math.sin(t)) * 0.07;
+    if (p.head) p.head.rotation.y = Math.sin(t * 0.8) * 0.28;
+  } else if (mon.type === 'frost_wraith') {
+    const float = Math.sin(t * 0.8) * 0.18;
+    if (p.torso) p.torso.position.y = 1.25 + float;
+    if (p.head) p.head.position.y = 2.45 + float;
+    if (p.armL) p.armL.rotation.z = -0.45 + Math.sin(t) * 0.12;
+    if (p.armR) p.armR.rotation.z = 0.45 - Math.sin(t) * 0.12;
+    if (p.core) p.core.rotation.y += dt * 3.2;
   } else {
     const swing = isMoving ? Math.sin(t) * 0.82 : Math.sin(t) * 0.42;
     if (p.legL) p.legL.rotation.x = swing;
@@ -941,6 +1218,7 @@ export function updateMonsterAnimation(mon, dt, elapsedTime, isMoving) {
 export function updateWorldEnvironment(dt, elapsedTime, wildlifeList = [], farmingNodes = [], interactiveDoors = []) {
   for (let i = 0; i < animatedCampfires.length; i++) {
     const cf = animatedCampfires[i];
+    if (cf._culled) continue;
     if (cf.fireLight) {
       cf.fireLight.intensity = 2.0 + Math.sin(elapsedTime * 12 + i) * 0.35;
     }
@@ -977,12 +1255,14 @@ export function updateWorldEnvironment(dt, elapsedTime, wildlifeList = [], farmi
   // อัปเดตบานพับประตูทุกบานให้เปิด-ปิดอย่างนุ่มนวล
   for (let i = 0; i < interactiveDoors.length; i++) {
     const d = interactiveDoors[i];
+    if (Math.abs(d.targetAngle - d.currentAngle) < 0.001) continue;
     d.currentAngle = THREE.MathUtils.lerp(d.currentAngle, d.targetAngle, Math.min(1, dt * 9));
     d.hingePivot.rotation.y = d.currentAngle;
   }
 
   for (let i = 0; i < wildlifeList.length; i++) {
     const w = wildlifeList[i];
+    if (w._culled) continue;
     w.angle += dt * w.speed;
     const wx = w.centerX + Math.cos(w.angle) * w.radius;
     const wz = w.centerZ + Math.sin(w.angle) * w.radius;
@@ -1082,7 +1362,8 @@ export function createFarmingNodeMesh(nodeType) {
 }
 
 // ==================== 4. สร้างผังมหานคร ถนนหิน Cobblestone เรียบเนียน และการจัดวางที่เป็นระเบียบ ====================
-export function buildRealisticGrandTown(town, worldNoise, worldGroup, worldColliders, streetLampMaterials, streetLampGlowDiscs = [], interactiveSeats = []) {
+export async function buildRealisticGrandTown(town, worldNoise, worldGroup, worldColliders, streetLampMaterials, streetLampGlowDiscs = [], interactiveSeats = [], streetLampPointLights = []) {
+  const yieldFrame = () => new Promise(resolve => requestAnimationFrame(resolve));
   const tg = new THREE.Group();
   const baseY = worldNoise.getHeight(town.x, town.z);
   tg.position.set(town.x, baseY, town.z);
@@ -1140,7 +1421,7 @@ export function buildRealisticGrandTown(town, worldNoise, worldGroup, worldColli
   innerRingRoad.position.y = 0.028;
   innerRingRoad.receiveShadow = true;
 
-  const outerRingRoad = new THREE.Mesh(new THREE.RingGeometry(46.5, 53.5, 72), ringRoadMat);
+  const outerRingRoad = new THREE.Mesh(new THREE.RingGeometry(68, 75, 72), ringRoadMat);
   outerRingRoad.rotation.x = -Math.PI / 2;
   outerRingRoad.position.y = 0.028;
   outerRingRoad.receiveShadow = true;
@@ -1155,53 +1436,7 @@ export function buildRealisticGrandTown(town, worldNoise, worldGroup, worldColli
 
   tg.add(roadNS, roadEW, innerRingRoad, outerRingRoad, centralPlaza, plazaRim);
 
-  // 2. แลนด์มาร์กใจกลางจัตุรัส
-  if (town.style === 'elven') {
-    const treeTrunk = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 4.0, 16, 16), timberMat);
-    treeTrunk.position.y = 8.0;
-    const canopy = new THREE.Mesh(
-      new THREE.SphereGeometry(11.5, 24, 20),
-      createAnimeMaterial({ color: 0x10b981, emissive: 0x059669, emissiveIntensity: 0.22 })
-    );
-    canopy.position.y = 17.5;
-    canopy.scale.y = 0.65;
-    tg.add(treeTrunk, canopy);
-    worldColliders.push({ x: town.x, z: town.z, radius: 3.8, topY: baseY + 16 });
-  } else if (town.style === 'volcano') {
-    const anvilBase = new THREE.Mesh(new THREE.CylinderGeometry(4.2, 4.8, 1.2, 16), stoneWallMat);
-    anvilBase.position.y = 0.6;
-    const brazierFire = createVolumetricCampfire(1.6, false);
-    brazierFire.position.y = 1.2;
-    tg.add(anvilBase, brazierFire);
-    worldColliders.push({ x: town.x, z: town.z, radius: 4.5, topY: baseY + 1.5, stepable: true });
-  } else if (town.style === 'frost') {
-    const spire = new THREE.Mesh(
-      new THREE.ConeGeometry(3.2, 17, 8),
-      createAnimeMaterial({ color: 0x38bdf8, emissive: 0x0284c7, emissiveIntensity: 0.35, roughness: 0.2 })
-    );
-    spire.position.y = 8.5;
-    tg.add(spire);
-    worldColliders.push({ x: town.x, z: town.z, radius: 3.2, topY: baseY + 17 });
-  } else {
-    const fountainBasin = new THREE.Mesh(new THREE.CylinderGeometry(4.2, 4.6, 1.0, 28), stoneWallMat);
-    fountainBasin.position.y = 0.5;
-    const waterPool = new THREE.Mesh(
-      new THREE.CylinderGeometry(3.8, 3.8, 0.85, 24),
-      createAnimeMaterial({ color: 0x38bdf8, roughness: 0.2 })
-    );
-    waterPool.position.y = 0.52;
-    const crystal = new THREE.Mesh(
-      new THREE.OctahedronGeometry(1.35, 0),
-      new THREE.MeshStandardMaterial({ color: town.themeColor, emissive: town.themeColor, emissiveIntensity: 0.85 })
-    );
-    crystal.position.y = 3.2;
-    crystal.userData.baseY = 3.2;
-    animatedTownCrystals.push(crystal);
-    tg.add(fountainBasin, waterPool, crystal);
-    worldColliders.push({ x: town.x, z: town.z, radius: 4.4, topY: baseY + 1.2, stepable: true });
-  }
-
-  // 3. กำแพงมหานครหินล้อมรอบ 8 ส่วน
+  // 2. กำแพงมหานครหินล้อมรอบ 8 ส่วน
   const wallSegments = [
     { x: -R * 0.54, z: R,  w: R * 0.76, d: 3.0 },
     { x: R * 0.54,  z: R,  w: R * 0.76, d: 3.0 },
@@ -1229,21 +1464,22 @@ export function buildRealisticGrandTown(town, worldNoise, worldGroup, worldColli
     tg.add(tower, tRoof);
     worldColliders.push({ x: town.x + tx, z: town.z + tz, radius: 4.5, topY: baseY + 12.5 });
   });
+  await yieldFrame();
 
   // 4. อาคารบ้านเรือนจัดวางอย่างเป็นระเบียบตามบล็อกถนน (ไม่ทับถนนและไม่มีกองไฟวางเกะกะมั่วซั่ว!)
   const neatDistrictHouses = [
-    { x: -17, z: -17, w: 8.5, h: 6.4, d: 7.5, color: 0xfef3c7, rotY: 0 },
-    { x: 17,  z: -17, w: 8.5, h: 6.4, d: 7.5, color: 0xffedd5, rotY: 0 },
-    { x: -17, z: 17,  w: 8.5, h: 6.0, d: 7.5, color: 0xf1f5f9, rotY: Math.PI },
-    { x: 17,  z: 17,  w: 8.5, h: 6.0, d: 7.5, color: 0xfce7f3, rotY: Math.PI },
-    { x: -16, z: -38, w: 8.5, h: 7.6, d: 7.5, color: 0xe2e8f0, rotY: Math.PI / 2 },
-    { x: 16,  z: -38, w: 8.5, h: 7.6, d: 7.5, color: 0xe2e8f0, rotY: -Math.PI / 2 },
-    { x: -16, z: 38,  w: 8.0, h: 5.8, d: 7.0, color: 0xffedd5, rotY: Math.PI / 2 },
-    { x: 16,  z: 38,  w: 8.0, h: 5.8, d: 7.0, color: 0xdcfce7, rotY: -Math.PI / 2 },
-    { x: -42, z: -42, w: 9.0, h: 6.5, d: 8.0, color: 0xf8fafc, rotY: 0 },
-    { x: 42,  z: -42, w: 9.0, h: 6.5, d: 8.0, color: 0xfef9c3, rotY: 0 },
-    { x: -42, z: 42,  w: 9.0, h: 6.2, d: 8.0, color: 0xe0f2fe, rotY: Math.PI },
-    { x: 42,  z: 42,  w: 9.0, h: 6.2, d: 8.0, color: 0xfce7f3, rotY: Math.PI }
+    { x: -18, z: -43, w: 8.5, h: 6.4, d: 7.5, color: 0xfef3c7, rotY: 0 },
+    { x: 18,  z: -43, w: 8.5, h: 6.4, d: 7.5, color: 0xffedd5, rotY: 0 },
+    { x: -18, z: 43,  w: 8.5, h: 6.0, d: 7.5, color: 0xf1f5f9, rotY: Math.PI },
+    { x: 18,  z: 43,  w: 8.5, h: 6.0, d: 7.5, color: 0xfce7f3, rotY: Math.PI },
+    { x: -66, z: -60, w: 8.5, h: 7.6, d: 7.5, color: 0xe2e8f0, rotY: Math.PI / 2 },
+    { x: 66,  z: -60, w: 8.5, h: 7.6, d: 7.5, color: 0xe2e8f0, rotY: -Math.PI / 2 },
+    { x: -66, z: 60,  w: 8.0, h: 5.8, d: 7.0, color: 0xffedd5, rotY: Math.PI / 2 },
+    { x: 66,  z: 60,  w: 8.0, h: 5.8, d: 7.0, color: 0xdcfce7, rotY: -Math.PI / 2 },
+    { x: -36, z: -36, w: 9.0, h: 6.5, d: 8.0, color: 0xf8fafc, rotY: 0 },
+    { x: 36,  z: -36, w: 9.0, h: 6.5, d: 8.0, color: 0xfef9c3, rotY: 0 },
+    { x: -36, z: 36,  w: 9.0, h: 6.2, d: 8.0, color: 0xe0f2fe, rotY: Math.PI },
+    { x: 36,  z: 36,  w: 9.0, h: 6.2, d: 8.0, color: 0xfce7f3, rotY: Math.PI }
   ];
 
   neatDistrictHouses.forEach((b) => {
@@ -1287,6 +1523,7 @@ export function buildRealisticGrandTown(town, worldNoise, worldGroup, worldColli
     tg.add(bGroup);
     registerBoxCollider(worldColliders, town.x + b.x, town.z + b.z, b.w + 0.3, b.d + 0.3, baseY + b.h, false);
   });
+  await yieldFrame();
 
   // 5. ชุดโต๊ะเก้าอี้พักผ่อนกลางแจ้งรอบลานน้ำพุ (คลิกเพื่อนั่งพักชมเมืองได้ทุกตัว!)
   [
@@ -1338,7 +1575,7 @@ export function buildRealisticGrandTown(town, worldNoise, worldGroup, worldColli
     [13.5, 6.2, -Math.PI / 2], [13.5, -6.2, -Math.PI / 2],
     [-13.5, 6.2, Math.PI / 2], [-13.5, -6.2, Math.PI / 2]
   ].forEach(([lx, lz, rot]) => {
-    const lamp = createOrnateStreetLamp(lx, 0, lz, rot, streetLampMaterials, streetLampGlowDiscs);
+    const lamp = createOrnateStreetLamp(lx, 0, lz, rot, streetLampMaterials, streetLampGlowDiscs, streetLampPointLights);
     tg.add(lamp);
   });
 

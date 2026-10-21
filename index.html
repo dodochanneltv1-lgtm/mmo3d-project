@@ -22,6 +22,16 @@
   <div id="canvas-container"></div>
   <div id="world-labels-layer"></div>
   <div id="dmg-layer"></div>
+  <div id="screen-loading" class="hidden fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95">
+    <div class="loading-card glass gold-border rounded-3xl px-8 py-9 w-[min(90vw,420px)] text-center">
+      <div class="loading-orbit mx-auto mb-5"><span></span></div>
+      <div class="text-amber-300 text-xs font-bold tracking-[0.28em]">AETHELGARD CHRONICLES</div>
+      <h1 class="text-2xl font-extrabold text-white mt-2">กำลังเตรียมโลก</h1>
+      <p id="loading-status" class="text-sm text-slate-300 mt-2">กำลังโหลดเมืองและเส้นทาง...</p>
+      <div class="loading-track mt-6"><div id="loading-progress" class="loading-progress"></div></div>
+      <div id="loading-percent" class="text-amber-200 font-mono text-xs mt-2">0%</div>
+    </div>
+  </div>
 
   <!-- เป้าเล็ง Crosshair สำหรับโหมดมุมมองบุคคลที่ 3 และ 1 (หันตามเมาส์อัตโนมัติ) -->
   <div id="fps-crosshair" class="hidden fixed inset-0 pointer-events-none z-30 flex items-center justify-center">
@@ -39,7 +49,7 @@
   <div id="sculpt-hover-tooltip" class="hidden fixed z-50 pointer-events-none px-3 py-1.5 rounded-xl bg-slate-950/90 border border-amber-400 text-xs text-amber-200 shadow-xl"></div>
 
   <!-- Top Center Status Bar: เวลา, สภาพอากาศตามธรรมชาติ, มุมกล้อง 4 โหมด, ฟิลเตอร์ Reshade -->
-  <div class="fixed top-2 left-1/2 -translate-x-1/2 z-40 flex flex-wrap items-center justify-center gap-2 pointer-events-auto">
+  <div id="top-status-bar" class="fixed top-2 left-1/2 -translate-x-1/2 z-40 flex flex-wrap items-center justify-center gap-2 pointer-events-auto">
     <div id="clock-badge" class="glass px-3 py-1 rounded-full text-[11px] flex items-center gap-1.5 border border-amber-400/30">
       <span id="time-icon">☀️</span>
       <span id="time-text" class="font-mono font-bold text-amber-300">08:00 น.</span>
@@ -60,6 +70,9 @@
     </div>
     <button id="btn-audio-toggle" class="glass px-2.5 py-1 rounded-full text-[11px] hover:bg-slate-800 transition flex items-center gap-1 border border-amber-400/30">
       <span id="audio-icon">🔊</span> <span id="audio-label">เสียง</span>
+    </button>
+    <button id="btn-toggle-mobile-ui" type="button" class="hidden glass border border-amber-400/50 text-amber-100 font-bold text-[11px] px-3 py-1 rounded-full shadow-lg" aria-pressed="true">
+      🎮 ซ่อนปุ่มมือถือ
     </button>
   </div>
 
@@ -210,9 +223,22 @@
   </div>
 
   <!-- ================= 3. หน้าจอขณะเล่นจริง (IN-GAME HUD) ================= -->
+  <div id="death-screen" class="hidden fixed inset-0 z-[80] pointer-events-auto flex items-center justify-center bg-slate-950/75 backdrop-blur-sm">
+    <section class="death-panel glass gold-border rounded-3xl w-[min(92vw,28rem)] p-8 text-center">
+      <div class="death-icon text-6xl mb-3" aria-hidden="true">💀</div>
+      <p class="text-xs tracking-[0.35em] text-rose-300 font-bold mb-2">YOU HAVE FALLEN</p>
+      <h2 class="text-3xl font-extrabold text-white mb-2">หมดสติในการต่อสู้</h2>
+      <p id="death-reason" class="text-sm text-slate-300 mb-6">พ่ายแพ้ในการต่อสู้</p>
+      <button id="btn-respawn" type="button" disabled class="w-full bg-gradient-to-r from-emerald-400 to-teal-300 text-slate-950 font-extrabold py-3 rounded-xl shadow-lg transition disabled:opacity-50 disabled:cursor-wait">
+        กำลังรอฟื้นคืนชีพ...
+      </button>
+      <p class="text-[11px] text-slate-400 mt-3">เกิดใหม่ที่เมืองใกล้ที่สุด • ฟื้นฟู HP 50%</p>
+    </section>
+  </div>
+
   <div id="screen-hud" class="hidden fixed inset-0 z-20 pointer-events-none">
     <!-- Top Left: Player Status Card (HP, MP, STAMINA, EXP) -->
-    <div class="pointer-events-auto fixed top-3 left-3 glass gold-border rounded-2xl p-3.5 w-80">
+    <div class="hud-player-card pointer-events-auto fixed top-3 left-3 glass gold-border rounded-2xl p-3.5 w-80">
       <div class="flex items-center justify-between mb-1.5">
         <div>
           <div class="flex items-center gap-1.5">
@@ -249,6 +275,13 @@
           <div id="hud-stamina-bar" class="h-full bg-gradient-to-r from-emerald-500 to-lime-400 transition-all duration-150" style="width:100%"></div>
         </div>
       </div>
+      <!-- HUNGER Bar (ค่าความหิว) -->
+      <div class="mb-1">
+        <div class="flex justify-between text-[10px] mb-0.5"><span class="text-orange-300 font-semibold">🍖 ความหิว (HUNGER)</span><span id="hud-hunger-text">100 / 100</span></div>
+        <div class="w-full h-2 bg-slate-900 rounded-full overflow-hidden border border-slate-700">
+          <div id="hud-hunger-bar" class="h-full bg-gradient-to-r from-orange-500 to-amber-400 transition-all duration-200" style="width:100%"></div>
+        </div>
+      </div>
       <!-- EXP Bar -->
       <div>
         <div class="flex justify-between text-[10px] mb-0.5"><span class="text-amber-300 font-semibold">EXP</span><span id="hud-exp-text">0 / 100</span></div>
@@ -266,16 +299,19 @@
     </div>
 
     <!-- Top Center: Target Monster & Combo Queue Bar -->
-    <div id="hud-target-box" class="hidden fixed top-12 left-1/2 -translate-x-1/2 glass rounded-2xl px-5 py-2 w-80 border border-rose-500/40 text-center">
+    <div id="hud-target-box" class="hidden fixed top-12 left-1/2 -translate-x-1/2 glass rounded-2xl px-4 py-2.5 w-80 border border-rose-500/40 text-center">
       <div class="flex justify-between items-center text-xs mb-1">
         <span id="target-name" class="font-bold text-rose-300">สไลม์วารี</span>
-        <span id="target-lv" class="text-[11px] text-slate-300">Lv.1</span>
+        <span class="flex items-center gap-2">
+          <span id="target-boss-label" class="hidden rounded-full bg-rose-500/20 border border-rose-300/50 px-2 py-0.5 text-[9px] font-extrabold tracking-wide text-rose-100">BOSS</span>
+          <span id="target-lv" class="text-[11px] text-slate-300">Lv.1</span>
+        </span>
       </div>
       <div class="w-full h-2.5 bg-slate-950 rounded-full overflow-hidden border border-slate-700">
         <div id="target-hp-bar" class="h-full bg-gradient-to-r from-rose-600 to-orange-400 transition-all duration-150" style="width:100%"></div>
       </div>
       <div class="flex justify-between items-center text-[10px] text-slate-300 mt-0.5">
-        <span id="target-hp-text">90 / 90</span>
+        <span class="flex items-center gap-2"><span id="target-hp-text">90 / 90</span><span id="target-zone" class="text-slate-400">เขตเริ่มต้น</span></span>
         <span id="combo-badge" class="text-amber-300 font-extrabold">COMBO x1</span>
       </div>
     </div>
@@ -288,23 +324,19 @@
       </div>
     </div>
 
-    <!-- Right Side: Minimap + Town Teleport + Quests + Roleplay Emotes -->
-    <div class="pointer-events-auto fixed top-3 right-3 flex flex-col gap-2 w-64">
-      <div class="glass rounded-2xl p-2.5 flex flex-col items-center">
+    <!-- Right Side: Map, Quests and Roleplay Emotes -->
+    <div class="hud-map-stack pointer-events-auto fixed top-3 right-3 flex flex-col gap-2 w-64">
+      <div class="hud-map-panel glass map-panel rounded-2xl p-2.5 flex flex-col items-center">
         <div class="w-full flex justify-between items-center text-[11px] mb-1 px-1">
-          <span id="hud-biome" class="font-bold text-amber-300 truncate">📍 มหานครเอเธลการ์ด</span>
-          <span id="hud-coords" class="font-mono text-[10px] text-slate-300">0,0</span>
+          <span id="hud-biome" class="font-bold text-amber-200 truncate">📍 มหานครเอเธลการ์ด</span>
+          <span id="hud-coords" class="map-coordinates font-mono text-[10px] text-slate-200">0,0</span>
         </div>
-        <canvas id="minimap-canvas" width="215" height="135" class="rounded-xl border border-slate-700 bg-slate-950"></canvas>
-        <div class="w-full mt-2">
-          <div class="text-[10px] text-slate-300 mb-1">วาร์ปไปมหานครทั้ง 4 เมือง:</div>
-          <div class="grid grid-cols-2 gap-1 text-[10px]">
-            <button data-town="0" class="town-warp-btn bg-slate-800 hover:bg-amber-500/30 border border-slate-600 rounded px-1.5 py-1 text-left truncate">🏰 1.นครเอเธลการ์ด</button>
-            <button data-town="1" class="town-warp-btn bg-slate-800 hover:bg-emerald-500/30 border border-slate-600 rounded px-1.5 py-1 text-left truncate">🌲 2.นครซิลแวนเวล</button>
-            <button data-town="2" class="town-warp-btn bg-slate-800 hover:bg-orange-500/30 border border-slate-600 rounded px-1.5 py-1 text-left truncate">🌋 3.ป้อมไพร์โฮลด์</button>
-            <button data-town="3" class="town-warp-btn bg-slate-800 hover:bg-cyan-500/30 border border-slate-600 rounded px-1.5 py-1 text-left truncate">❄️ 4.ท่าฟรอสต์เฮเวน</button>
-          </div>
+        <canvas id="minimap-canvas" width="215" height="135" class="map-canvas rounded-xl border border-slate-600 bg-slate-950"></canvas>
+        <div class="map-legend w-full flex justify-between items-center mt-1.5 px-1 text-[9px] text-slate-300">
+          <span>🟡 เมือง</span><span>🟣 ร้านแฟชั่น</span><span>🔵 ผู้เล่น</span>
+          <span class="font-bold text-white">▲ N</span>
         </div>
+        <button id="btn-open-carriage-dest" class="hidden w-full mt-1 rounded-lg bg-amber-500/20 border border-amber-400/40 text-amber-200 hover:bg-amber-500/35 py-1 text-[10px] font-bold">🐎 เปลี่ยนปลายทางรถม้า</button>
       </div>
 
       <!-- Guild Quest Box -->
@@ -313,6 +345,7 @@
           <span class="font-bold text-amber-300">📜 ภารกิจกิลด์นักผจญภัย</span>
           <span id="quest-status-badge" class="text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-200">เควส #1</span>
         </div>
+
         <div id="quest-title" class="font-semibold text-white text-[11px]">กวาดล้างมอนสเตอร์และฟาร์มวัตถุดิบ</div>
         <div class="flex justify-between items-center mt-1.5 pt-1 border-t border-slate-700/70 text-[11px]">
           <span id="quest-progress" class="text-emerald-300 font-bold">ความคืบหน้า: 0 / 3</span>
@@ -335,11 +368,26 @@
       </div>
     </div>
 
+    <div id="carriage-destination-panel" class="hidden pointer-events-auto fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 glass carriage-panel rounded-2xl p-4 w-[min(92vw,420px)] z-40">
+      <div class="flex items-center justify-between mb-1">
+        <h3 class="text-base font-extrabold text-amber-200">🐎 เลือกปลายทางรถม้า</h3>
+        <button id="btn-close-carriage-panel" class="text-slate-300 hover:text-white px-2 py-1 rounded-lg bg-slate-800">✕</button>
+      </div>
+      <p class="text-[11px] text-slate-300 mb-3">รถม้าจะเดินทางตามเส้นทางและหลบสิ่งกีดขวาง ระหว่างทางกด WASD หรือ Space เพื่อลง</p>
+      <label for="carriage-destination-select" class="block text-xs text-slate-200 mb-1">เมือง / ร้านค้า</label>
+      <select id="carriage-destination-select" class="w-full bg-slate-950 border border-slate-600 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-amber-400"></select>
+      <div id="carriage-route-status" class="min-h-6 text-[11px] text-sky-200 mt-2"></div>
+      <button id="btn-start-carriage-route" class="w-full mt-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold rounded-xl py-2 text-sm">เริ่มเดินทาง</button>
+    </div>
+
     <!-- Bottom Left: Multiplayer & Roleplay Chat Box -->
-    <div class="pointer-events-auto fixed bottom-3 left-3 glass rounded-2xl p-2.5 w-80 h-44 flex flex-col">
+    <div class="hud-chat-panel pointer-events-auto fixed bottom-3 left-3 glass rounded-2xl p-2.5 w-80 h-44 flex flex-col">
       <div class="flex justify-between items-center text-[11px] font-bold text-amber-300 mb-1">
         <span>💬 แชทออนไลน์ & Roleplay (<span id="online-count">1</span> คน)</span>
-        <span class="text-[9px] text-slate-400">พิมพ์ /me แสดงบทบาท</span>
+        <div class="flex items-center gap-2">
+          <button id="btn-party-panel" class="rounded-md bg-indigo-500/20 border border-indigo-400/40 px-2 py-0.5 text-[9px] text-indigo-200 hover:bg-indigo-500/40">👥 ปาร์ตี้</button>
+          <span class="text-[9px] text-slate-400">พิมพ์ /me แสดงบทบาท</span>
+        </div>
       </div>
       <div id="game-log" class="flex-1 overflow-y-auto custom-scroll text-[11px] space-y-1 pr-1 text-slate-200 mb-1.5"></div>
       <form id="chat-form" class="flex gap-1">
@@ -348,11 +396,31 @@
       </form>
     </div>
 
+    <div id="party-panel" class="hidden pointer-events-auto fixed bottom-52 left-3 glass gold-border rounded-2xl p-3 w-[min(92vw,20rem)] max-h-64 flex flex-col z-40">
+      <div class="flex items-center justify-between border-b border-white/10 pb-2">
+        <div>
+          <h3 class="text-xs font-extrabold text-indigo-200">👥 ปาร์ตี้ผจญภัย</h3>
+          <p id="party-status" class="text-[10px] text-slate-300 mt-0.5">ยังไม่ได้เข้าร่วมทีม</p>
+        </div>
+        <button id="btn-close-party-panel" class="rounded-lg bg-slate-800 px-2 py-1 text-xs hover:bg-rose-600">✕</button>
+      </div>
+      <div id="party-members-list" class="my-2 space-y-1 overflow-y-auto custom-scroll text-[11px]"></div>
+      <button id="btn-leave-party" class="hidden mt-1 rounded-lg bg-rose-500/20 border border-rose-400/40 py-1.5 text-[10px] font-bold text-rose-200 hover:bg-rose-500/40">ออกจากปาร์ตี้</button>
+    </div>
+    <div id="party-invite-prompt" class="hidden pointer-events-auto fixed bottom-52 left-1/2 -translate-x-1/2 glass gold-border rounded-2xl p-3 w-[min(92vw,360px)] z-50">
+      <p id="party-invite-text" class="text-xs text-white text-center mb-3"></p>
+      <div class="flex gap-2">
+        <button id="btn-accept-party-invite" class="flex-1 rounded-lg bg-emerald-500 py-1.5 text-xs font-bold text-slate-950 hover:bg-emerald-400">เข้าร่วมทีม</button>
+        <button id="btn-decline-party-invite" class="flex-1 rounded-lg bg-slate-700 py-1.5 text-xs font-bold hover:bg-slate-600">ปฏิเสธ</button>
+      </div>
+    </div>
+
     <!-- Bottom Center: Combat, Inventory, Farming & Skill Hotbar -->
-    <div class="pointer-events-auto fixed bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5">
+    <div class="hud-hotbar pointer-events-auto fixed bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5">
       <div class="glass px-3.5 py-1 rounded-full text-[10px] text-slate-300 flex flex-wrap items-center justify-center gap-2.5">
         <span><b class="text-amber-300">WASD</b> เดิน</span>
         <span><b class="text-emerald-300">Shift ค้าง</b> วิ่งไว (ใช้ Stamina)</span>
+        <span><b class="text-cyan-300">Shift+Space</b> แดชหลบ</span>
         <span><b class="text-sky-300">คลิกขวาค้าง</b> หมุนกล้อง (Roblox)</span>
         <span><b class="text-amber-300">คลิกมอน/F</b> ต่อคอมโบ</span>
         <span><b class="text-pink-300">คลิกแร่/E</b> ฟาร์มของ</span>
@@ -485,11 +553,133 @@
       <div class="flex justify-between items-center pb-3 border-b border-slate-700">
         <div>
           <h3 id="storage-modal-title" class="text-lg font-bold text-amber-300">🗄️ ตู้เก็บของส่วนตัวประจำห้องพัก</h3>
-          <p class="text-xs text-slate-300">ฝากและถอนเหรียญทองคำ (Gold) หรือวัตถุดิบจากการฟาร์มเก็บไว้ในตู้เซฟห้องพักของคุณ</p>
+          <p class="text-xs text-slate-300">จัดการคลังส่วนตัวและสวมใส่แฟชั่นที่เก็บไว้ในตู้เสื้อผ้า</p>
         </div>
         <button id="btn-close-storage" class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-xs">✕ ปิด</button>
       </div>
       <div id="storage-items-list" class="space-y-2.5 my-4 overflow-y-auto custom-scroll pr-1"></div>
+    </div>
+  </div>
+  <!-- ================= 9. หน้าต่างร้านค้าจิปาถะ (GENERAL STORE MODAL) ================= -->
+  <div id="modal-general" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4">
+    <div class="glass gold-border rounded-2xl w-full max-w-2xl p-5 max-h-[85vh] flex flex-col">
+      <div class="flex justify-between items-center pb-3 border-b border-slate-700">
+        <div>
+          <h3 class="text-lg font-bold text-emerald-300">🏪 ร้านค้าจิปาถะ (พ่อค้ามาร์โค)</h3>
+          <p class="text-xs text-slate-300">จำหน่ายคันเบ็ดตกปลา เหยื่อตกปลา ยาฟื้นฟู และเสบียงเดินป่า</p>
+        </div>
+        <button id="btn-close-general" class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-xs">✕ ปิด</button>
+      </div>
+      <div id="general-items-grid" class="grid grid-cols-1 md:grid-cols-2 gap-2.5 my-4 overflow-y-auto custom-scroll pr-1"></div>
+    </div>
+  </div>
+
+  <!-- ================= 10. หน้าต่างตลาดซื้อ/ขายปลา (FISH & MATERIAL MARKET MODAL) ================= -->
+  <div id="modal-market" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4">
+    <div class="glass gold-border rounded-2xl w-full max-w-2xl p-5 max-h-[85vh] flex flex-col">
+      <div class="flex justify-between items-center pb-3 border-b border-slate-700">
+        <div>
+          <h3 class="text-lg font-bold text-sky-300">⚖️ ตลาดกลางซื้อ/ขายปลาและอาหารทะเล (แม่ค้าลินดา)</h3>
+          <p class="text-xs text-slate-300">รับซื้อปลาสดๆ ที่ตกได้ในราคาสูง และจำหน่ายเนื้อปลาสด/ปลาย่างพร้อมทาน</p>
+        </div>
+        <button id="btn-close-market" class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-xs">✕ ปิด</button>
+      </div>
+      <div id="market-items-grid" class="grid grid-cols-1 md:grid-cols-2 gap-2.5 my-4 overflow-y-auto custom-scroll pr-1"></div>
+    </div>
+  </div>
+
+  <!-- ================= 11. หน้าต่างร้านค้าแฟชั่น (FASHION SHOP MODAL) ================= -->
+  <div id="modal-fashion" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4">
+    <div class="glass gold-border rounded-2xl w-full max-w-2xl p-5 max-h-[85vh] flex flex-col">
+      <div class="flex justify-between items-center pb-3 border-b border-slate-700">
+        <div>
+          <h3 class="text-lg font-bold text-purple-300">👗 ห้องเสื้อและร้านค้าแฟชั่น (ดีไซเนอร์วิเวียน)</h3>
+          <p class="text-xs text-slate-300">เลือกซื้อชุดแฟชั่น หมวก ผ้าคลุม และปีกขยับได้สวมใส่ได้ทันที!</p>
+        </div>
+        <div class="flex gap-2">
+          <button id="btn-open-fashion-wardrobe" class="px-3 py-1 rounded-lg bg-purple-700 hover:bg-purple-600 text-xs">👗 ตู้เสื้อผ้า</button>
+          <button id="btn-close-fashion" class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-xs">✕ ปิด</button>
+        </div>
+      </div>
+      <div id="fashion-items-grid" class="grid grid-cols-1 md:grid-cols-2 gap-2.5 my-4 overflow-y-auto custom-scroll pr-1"></div>
+    </div>
+  </div>
+
+  <!-- ================= 12. ระบบควบคุมบนมือถือ (MOBILE TOUCH JOYSTICK & BUTTONS) ================= -->
+  <div id="mobile-controls" class="hidden fixed inset-0 pointer-events-none z-30">
+    <!-- จอยสติ๊กฝั่งซ้าย -->
+    <div id="joystick-zone" class="pointer-events-auto fixed bottom-24 left-6 w-32 h-32 rounded-full bg-slate-900/60 border-2 border-amber-400/50 flex items-center justify-center touch-none">
+      <div id="joystick-knob" class="w-14 h-14 rounded-full bg-amber-400/80 shadow-lg transition-transform duration-75"></div>
+    </div>
+    <!-- ปุ่มแอคชั่นฝั่งขวาบนมือถือ -->
+    <div class="mobile-action-panel pointer-events-auto fixed bottom-24 right-4 flex flex-col gap-2 items-end touch-none">
+      <div class="flex gap-2">
+        <button id="mob-btn-fish" class="w-12 h-12 rounded-full bg-sky-600/85 border border-sky-300 text-white font-bold text-xs shadow-lg">🎣ตกปลา</button>
+        <button id="mob-btn-cook" class="w-12 h-12 rounded-full bg-orange-600/85 border border-orange-300 text-white font-bold text-xs shadow-lg">🔥ย่างปลา</button>
+        <button id="mob-btn-eat" class="w-12 h-12 rounded-full bg-lime-600/85 border border-lime-300 text-slate-950 font-bold text-xs shadow-lg">🍖กิน</button>
+      </div>
+      <div class="flex gap-2">
+        <button id="mob-btn-interact" class="w-14 h-14 rounded-full bg-emerald-500/85 border-2 border-emerald-200 text-slate-950 font-extrabold text-xs shadow-lg">✋ E คุย/เก็บ</button>
+        <button id="mob-btn-jump" class="w-14 h-14 rounded-full bg-indigo-500/85 border-2 border-indigo-200 text-white font-extrabold text-xs shadow-lg">⬆️ กระโดด</button>
+        <button id="mob-btn-dash" class="w-12 h-12 rounded-full bg-cyan-600/90 border-2 border-cyan-200 text-white font-extrabold text-xs shadow-lg">💨 แดช</button>
+        <button id="mob-btn-sprint" class="w-14 h-14 rounded-full bg-amber-500/85 border-2 border-amber-200 text-slate-950 font-extrabold text-xs shadow-lg">⚡ วิ่งไว</button>
+      </div>
+      <div class="flex gap-2">
+        <button id="mob-btn-skill1" class="w-12 h-12 rounded-full bg-blue-600/85 border border-blue-300 text-white font-bold text-xs shadow-lg">🌀สกิล1</button>
+        <button id="mob-btn-ult" class="w-12 h-12 rounded-full bg-purple-600/85 border border-purple-300 text-white font-bold text-xs shadow-lg">💥อัลติ</button>
+        <button id="mob-btn-atk" class="w-16 h-16 rounded-full bg-rose-600/90 border-2 border-amber-300 text-white font-extrabold text-sm shadow-xl">⚔️ โจมตี</button>
+      </div>
+    </div>
+  </div>
+  <!-- ================= 13. มินิเกมตกปลาด้านข้างแบบ Stardew Valley (ไม่บังหน้าจอ!) ================= -->
+  <div id="modal-fishing-minigame" class="hidden fixed right-72 bottom-28 z-40 pointer-events-auto">
+    <div class="glass gold-border rounded-2xl p-3.5 w-64 shadow-2xl border-2 border-sky-400/70 space-y-2">
+      <div class="flex justify-between items-center">
+        <span class="text-xs font-extrabold text-sky-300">🎣 เย่อปลาริมน้ำ!</span>
+        <span id="fish-catch-score" class="text-[11px] bg-emerald-500/30 border border-emerald-400 px-2 py-0.5 rounded-full text-emerald-200 font-bold">0 / 3</span>
+      </div>
+
+      <!-- หลอดตกปลาแนวขวางกะทัดรัดสไตล์ Stardew -->
+      <div class="relative w-full h-7 bg-slate-950/90 rounded-lg border border-sky-400/60 overflow-hidden">
+        <div id="fish-target-zone" class="absolute top-0 bottom-0 bg-emerald-500/55 border-x-2 border-emerald-300 flex items-center justify-center text-xs transition-all duration-75" style="left: 35%; width: 24%;">
+          🐟
+        </div>
+        <div id="fish-needle" class="absolute top-0 bottom-0 w-1.5 bg-amber-300 shadow-[0_0_8px_#fbbf24]" style="left: 50%;"></div>
+      </div>
+
+      <div id="fish-minigame-msg" class="text-[10px] text-amber-200 text-center">กด Space ตอนเข็มทับตัวปลา!</div>
+
+      <div class="flex gap-1.5">
+        <button id="btn-fish-strike" class="flex-1 bg-gradient-to-r from-sky-500 to-emerald-500 text-slate-950 font-extrabold py-1.5 rounded-lg text-xs shadow">
+          🎣 ดึงเบ็ด! [Space]
+        </button>
+        <button id="btn-fish-cancel" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-600 text-[10px] font-bold">✕</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 14. แผงเลือกของย่าง & มินิเกมย่างไฟมุมข้างแบบไม่บังจอ ================= -->
+  <div id="modal-campfire-cook" class="hidden fixed right-72 bottom-28 z-40 pointer-events-auto">
+    <div class="glass gold-border rounded-2xl w-80 p-3.5 flex flex-col gap-2.5 shadow-2xl border-2 border-orange-400/70">
+      <div class="flex justify-between items-center border-b border-slate-700/80 pb-1.5">
+        <span class="text-xs font-extrabold text-orange-300">🔥 แคมป์ไฟปิ้งย่าง</span>
+        <button id="btn-close-campfire" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-rose-600 text-[10px]">✕ ปิด</button>
+      </div>
+
+      <div id="campfire-select-section" class="space-y-1.5 max-h-44 overflow-y-auto custom-scroll pr-1"></div>
+
+      <div id="campfire-minigame-section" class="hidden bg-slate-950/90 border border-orange-400/50 rounded-xl p-2.5 text-center space-y-2">
+        <div id="grill-active-title" class="text-[11px] font-bold text-amber-300">🔥 กะจังหวะไฟให้ตรงโซนสีทอง!</div>
+        <div class="relative w-full h-6 bg-slate-900 rounded-lg border border-slate-700 overflow-hidden flex">
+          <div class="w-[35%] h-full bg-sky-900/50 text-[9px] flex items-center justify-center text-sky-300">ดิบ</div>
+          <div id="grill-sweet-spot" class="w-[24%] h-full bg-emerald-500/70 border-x-2 border-amber-300 text-[9px] font-bold flex items-center justify-center text-white">สุกพอดี</div>
+          <div class="flex-1 h-full bg-rose-950/80 text-[9px] flex items-center justify-center text-rose-300">⚫ไหม้</div>
+          <div id="grill-needle" class="absolute top-0 bottom-0 w-1.5 bg-white shadow-[0_0_8px_#fff]" style="left: 0%;"></div>
+        </div>
+        <button id="btn-grill-stop" class="w-full bg-gradient-to-r from-orange-500 to-amber-400 text-slate-950 font-extrabold py-1.5 rounded-lg text-xs">
+          🔥 ยกขึ้นจากเตา! [Space]
+        </button>
+      </div>
     </div>
   </div>
 

@@ -11,8 +11,29 @@ export const WEAPONS = {
   shield_knight:{ id: 'shield_knight',name: 'โล่และค้อนศึกพาราดิน',   type: 'shield', atk: 12, matk: 0,  price: 0,   color: 0x60a5fa },
   shield_aegis: { id: 'shield_aegis', name: 'โล่ทองคำเอจิสศักดิ์สิทธิ์',type: 'shield', atk: 30, matk: 14, price: 340, color: 0xfacc15 },
   tome_holy:    { id: 'tome_holy',    name: 'คัมภีร์แสงอรุณ',         type: 'tome',   atk: 4,  matk: 18, price: 0,   color: 0xfde047 },
-  tome_seraph:  { id: 'tome_seraph',  name: 'คัมภีร์เทวทูตเซราฟิม',   type: 'tome',   atk: 12, matk: 42, price: 310, color: 0x34d399 }
+  tome_seraph:  { id: 'tome_seraph',  name: 'คัมภีร์เทวทูตเซราฟิม',   type: 'tome',   atk: 12, matk: 42, price: 310, color: 0x34d399 },
+  gloves_brawler: { id: 'gloves_brawler', name: 'สนับมืออัศวินหมัดเหล็ก', type: 'gloves', atk: 22, matk: 0, price: 0, color: 0xf97316 }
 };
+
+function createWingFeatherGeometry(length, width, depth) {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, -width * 0.28);
+  shape.bezierCurveTo(length * 0.2, -width * 0.62, length * 0.72, -width * 0.52, length, 0);
+  shape.bezierCurveTo(length * 0.74, width * 0.5, length * 0.24, width * 0.48, 0, width * 0.28);
+  shape.quadraticCurveTo(-length * 0.06, 0, 0, -width * 0.28);
+  const geometry = new THREE.ExtrudeGeometry(shape, {
+    depth,
+    bevelEnabled: true,
+    bevelSegments: 2,
+    steps: 1,
+    bevelSize: Math.min(width * 0.08, depth * 0.35),
+    bevelThickness: depth * 0.45,
+    curveSegments: 8
+  });
+  geometry.translate(0, 0, -depth * 0.5);
+  geometry.computeVertexNormals();
+  return geometry;
+}
 
 // ==================== CACHE TEXTURE & GEOMETRY (ลื่นไหล 60FPS) ====================
 const faceTextureCache = new Map();
@@ -473,20 +494,17 @@ function createUpperTorsoGeometry(params) {
     let rz = rx * (isFemale ? 0.66 : 0.72);
     let yOffset = 0;
 
-    // ปั้นทรวดทรงหน้าอกอนิเมะให้ผสานเป็นเนื้อเดียวกับลำตัว (ทรงหยดน้ำคู่ละมุน ไม่เป็นลูกบอลกลมแข็ง)
+    // Keep the chest volume broad and integrated with the torso instead of forming two hard lobes.
     if (sinA > 0 && t > 0.34 && t < 0.82) {
       const u = (t - 0.34) / 0.48; // 0 = ใต้อก, 1 = เนินอกบนใกล้ไหปลาร้า
-      // ทรงหยดน้ำ: อิ่มตัวช่วงล่าง-กลาง (u ~ 0.42) และลาดเนียนขึ้นไปหาไหปลาร้า
       const verticalProfile = Math.sin(u * Math.PI) * Math.pow(1.0 - u * 0.32, 0.65);
 
       if (isFemale && clampedBust > 0.005) {
-        // เว้าช่วงร่องอกตรงกลางเล็กน้อย (cosA ≈ 0) และอิ่มออกด้านหน้าซ้าย-ขวาอย่างสมดุล
         const absX = Math.abs(cosA);
-        const dualLobe = THREE.MathUtils.smoothstep(absX, 0.0, 0.38) * (1.0 - THREE.MathUtils.smoothstep(absX, 0.55, 0.92));
-        const centerBridge = (1.0 - Math.exp(-absX * absX * 18.0) * 0.28);
-        const forwardBulge = verticalProfile * (0.032 + clampedBust * 0.62) * Math.pow(sinA, 1.35) * (0.65 + 0.35 * dualLobe) * centerBridge;
+        const softLobe = 0.94 + 0.06 * THREE.MathUtils.smoothstep(absX, 0.0, 0.45);
+        const forwardBulge = verticalProfile * (0.018 + clampedBust * 0.40) * Math.pow(sinA, 1.25) * softLobe;
         rz += forwardBulge;
-        rx += verticalProfile * clampedBust * 0.14 * Math.pow(sinA, 1.2);
+        rx += verticalProfile * clampedBust * 0.07 * Math.pow(sinA, 1.2);
         yOffset += (curveFactor - 1.0) * 0.025 * verticalProfile * sinA;
       } else {
         // แผงอกชายแข็งแกร่งสมส่วน
@@ -526,6 +544,33 @@ function createPleatedSkirtGeometry(waistW, hipW, length = 0.40, pleats = 20) {
   }
   geo.computeVertexNormals();
   return geo;
+}
+
+function createButterflyWingGeometry(width, height, lowerWing = false, depth = 0.035) {
+  const shape = new THREE.Shape();
+  if (lowerWing) {
+    shape.moveTo(0, 0);
+    shape.bezierCurveTo(width * 0.34, -height * 0.02, width * 0.78, -height * 0.30, width, -height * 0.68);
+    shape.quadraticCurveTo(width * 0.92, -height * 0.98, width * 0.62, -height);
+    shape.bezierCurveTo(width * 0.34, -height * 0.98, width * 0.13, -height * 0.56, 0, 0);
+  } else {
+    shape.moveTo(0, 0);
+    shape.bezierCurveTo(width * 0.28, height * 0.27, width * 0.70, height * 0.76, width, height * 0.78);
+    shape.quadraticCurveTo(width * 0.96, height * 0.36, width * 0.73, height * 0.12);
+    shape.bezierCurveTo(width * 0.48, -height * 0.07, width * 0.18, -height * 0.12, 0, 0);
+  }
+  const geometry = new THREE.ExtrudeGeometry(shape, {
+    depth,
+    bevelEnabled: true,
+    bevelSegments: 2,
+    steps: 1,
+    bevelSize: 0.018,
+    bevelThickness: 0.012,
+    curveSegments: 8
+  });
+  geometry.translate(0, 0, -depth * 0.5);
+  geometry.computeVertexNormals();
+  return geometry;
 }
 
 // 4.5 ผ้าคลุมไหล่อนิเมะแบบแผ่นผ้าพลิ้วมีจีบ (แทนท่อทรงกระบอกแข็งทื่อในภาพ image_252360.png!)
@@ -615,6 +660,7 @@ export class ArticulatedCharacter3D {
     this.joints = {};
     this.hairSpringNodes = [];
     this.bodyRenderGroups = [];
+    this.fashionMotionParts = [];
     this.clickableMeshes = [];
     this.animState = 'idle';
     this.animTime = Math.random() * 10;
@@ -659,7 +705,22 @@ export class ArticulatedCharacter3D {
     this.clickableMeshes = [];
     this.bodyRenderGroups = [];
     this.hairSpringNodes = [];
+    this.fashionMotionParts = [];
     const c = this.config;
+    const registerFashionMotion = (object, type, phase = this.fashionMotionParts.length * 1.7, clothMesh = null) => {
+      this.fashionMotionParts.push({
+        object,
+        type,
+        phase,
+        basePosition: object.position.clone(),
+        baseRotation: object.rotation.clone(),
+        baseScale: object.scale.clone(),
+        clothMesh,
+        clothOriginalPositions: clothMesh
+          ? new Float32Array(clothMesh.geometry.attributes.position.array)
+          : null
+      });
+    };
 
     const isFemale = c.gender === 'female' || String(c.bodyType).startsWith('female');
 
@@ -754,6 +815,7 @@ export class ArticulatedCharacter3D {
     const torsoMesh = new THREE.Mesh(torsoGeo, primaryMat);
     torsoGroup.add(torsoMesh);
     this.tagPart(torsoMesh, 'body', 'waist_hip', 'เอวและลำตัว (คลิกลากซ้าย/ขวา = ปรับความคอดเอว | ลากขึ้น/ลง = ความยาวลำตัว)');
+    registerFashionMotion(torsoMesh, 'top', undefined, torsoMesh);
 
     // โซนคลิกดัดหน้าอกแบบแนบเนียนไปกับเสื้อ (ไม่มีก้อนกลมยื่นแยกออกมา)
     const chestGroup = new THREE.Group();
@@ -762,7 +824,11 @@ export class ArticulatedCharacter3D {
 
     const chestHitProxy = new THREE.Mesh(
       new THREE.CylinderGeometry(shoulderW * 0.72, waistW * 0.88, upperLen * 0.34, 24, 1, true, 0.15, Math.PI - 0.30),
-      primaryMat
+      new THREE.MeshBasicMaterial({
+        colorWrite: false,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      })
     );
     chestHitProxy.scale.z = 0.68 + (isFemale ? bustSize * 1.4 : 0.05);
     chestGroup.add(chestHitProxy);
@@ -784,18 +850,22 @@ export class ArticulatedCharacter3D {
       sailorCollar.scale.z = 0.72;
       sailorCollar.position.y = upperLen * 0.85;
       const bowZ = 0.115 + bustSize * 0.36;
+      const bowGroup = new THREE.Group();
+      bowGroup.position.z = bowZ;
       const bowKnot = new THREE.Mesh(new THREE.SphereGeometry(0.030, 12, 12), redRibbonMat);
-      bowKnot.position.set(0, upperLen * 0.71, bowZ);
+      bowKnot.position.set(0, upperLen * 0.71, 0);
       [-1, 1].forEach(side => {
         const bowWing = new THREE.Mesh(new THREE.ConeGeometry(0.038, 0.095, 10), redRibbonMat);
-        bowWing.position.set(side * 0.045, upperLen * 0.72, bowZ);
+        bowWing.position.set(side * 0.045, upperLen * 0.72, 0);
         bowWing.rotation.z = side * 1.25;
         const ribbonTail = new THREE.Mesh(new THREE.BoxGeometry(0.030, 0.18, 0.01), redRibbonMat);
-        ribbonTail.position.set(side * 0.032, upperLen * 0.57, bowZ + 0.008);
+        ribbonTail.position.set(side * 0.032, upperLen * 0.57, 0.008);
         ribbonTail.rotation.z = -side * 0.18;
-        torsoGroup.add(bowWing, ribbonTail);
+        bowGroup.add(bowWing, ribbonTail);
       });
-      torsoGroup.add(sailorCollar, bowKnot);
+      bowGroup.add(bowKnot);
+      torsoGroup.add(sailorCollar, bowGroup);
+      registerFashionMotion(bowGroup, 'bow');
     } else {
       const collar = new THREE.Mesh(new THREE.TorusGeometry(0.098, 0.016, 10, 22), goldMat);
       collar.rotation.x = Math.PI / 2;
@@ -815,33 +885,52 @@ export class ArticulatedCharacter3D {
           pauldron.position.set(side * (shoulderW + 0.03), upperLen * 0.86, 0);
           pauldron.rotation.z = -side * 0.32;
           torsoGroup.add(pauldron);
+          registerFashionMotion(pauldron, 'armor', side * 0.6);
         });
+        const armorSkirtPivot = new THREE.Group();
+        armorSkirtPivot.position.y = -0.06;
         const armorSkirt = new THREE.Mesh(createPleatedSkirtGeometry(waistW, hipW * 1.08, 0.38, 12), goldMat);
-        armorSkirt.position.y = -0.06;
-        pelvis.add(armorSkirt);
-        this.bodyRenderGroups.push(armorSkirt);
+        armorSkirtPivot.add(armorSkirt);
+        pelvis.add(armorSkirtPivot);
+        this.bodyRenderGroups.push(armorSkirtPivot);
+        registerFashionMotion(armorSkirtPivot, 'skirt', undefined, armorSkirt);
+        this.tagPart(armorSkirt, 'body', 'hips_butt', 'เกราะกระโปรง');
       } else if (c.fullOutfit === 'archmage_robe') {
+        const robeSkirtPivot = new THREE.Group();
+        robeSkirtPivot.position.y = -0.22;
         const robeSkirt = new THREE.Mesh(createPleatedSkirtGeometry(waistW, hipW * 1.22, 0.72, 16), primaryMat);
-        robeSkirt.position.y = -0.22;
-        pelvis.add(robeSkirt);
-        this.bodyRenderGroups.push(robeSkirt);
+        robeSkirtPivot.add(robeSkirt);
+        pelvis.add(robeSkirtPivot);
+        this.bodyRenderGroups.push(robeSkirtPivot);
+        registerFashionMotion(robeSkirtPivot, 'skirt', undefined, robeSkirt);
+        this.tagPart(robeSkirt, 'body', 'hips_butt', 'ชายเสื้อคลุม');
       } else if (c.fullOutfit === 'royal_dress') {
+        const dressSkirtPivot = new THREE.Group();
+        dressSkirtPivot.position.y = -0.14;
         const dressSkirt = new THREE.Mesh(createPleatedSkirtGeometry(waistW, hipW * 1.28, 0.56, 20), primaryMat);
-        dressSkirt.position.y = -0.14;
-        pelvis.add(dressSkirt);
-        this.bodyRenderGroups.push(dressSkirt);
+        dressSkirtPivot.add(dressSkirt);
+        pelvis.add(dressSkirtPivot);
+        this.bodyRenderGroups.push(dressSkirtPivot);
+        registerFashionMotion(dressSkirtPivot, 'skirt', undefined, dressSkirt);
+        this.tagPart(dressSkirt, 'body', 'hips_butt', 'กระโปรงเดรส');
       }
     } else if ((c.bottomStyle === 'battle_skirt' && isFemale) || isSailor) {
+      const skirtPivot = new THREE.Group();
+      skirtPivot.position.y = -0.05;
       const skirtMesh = new THREE.Mesh(createPleatedSkirtGeometry(waistW, hipW * 1.12, 0.38, 22), secondaryMat);
-      skirtMesh.position.y = -0.05;
-      pelvis.add(skirtMesh);
-      this.bodyRenderGroups.push(skirtMesh);
+      skirtPivot.add(skirtMesh);
+      pelvis.add(skirtPivot);
+      this.bodyRenderGroups.push(skirtPivot);
+      registerFashionMotion(skirtPivot, 'skirt', undefined, skirtMesh);
       this.tagPart(skirtMesh, 'body', 'hips_butt', 'กระโปรงพลีท (คลิกลากซ้าย/ขวา = ปรับความผายสะโพก)');
     } else if (!isFemale && (c.topStyle === 'noble_coat' || c.topStyle === 'knight_vest')) {
+      const coatTailPivot = new THREE.Group();
+      coatTailPivot.position.y = -0.02;
       const coatTail = new THREE.Mesh(createPleatedSkirtGeometry(waistW * 1.02, hipW * 1.08, 0.30, 8), primaryMat);
-      coatTail.position.y = -0.02;
-      pelvis.add(coatTail);
-      this.bodyRenderGroups.push(coatTail);
+      coatTailPivot.add(coatTail);
+      pelvis.add(coatTailPivot);
+      this.bodyRenderGroups.push(coatTailPivot);
+      registerFashionMotion(coatTailPivot, 'skirt', undefined, coatTail);
     }
 
     // ==================== 2. ศีรษะและใบหน้าอนิเมะ (สว่างใส ไม่ถูกหมวกผมสีดำบัง 100%) ====================
@@ -1191,6 +1280,7 @@ export class ArticulatedCharacter3D {
         band.position.set(0, -0.14, 0.10);
         hatGroup.add(band);
       }
+      registerFashionMotion(hatGroup, 'hat');
       this.tagPart(hatGroup, 'hair', 'hair_back', 'หมวกและเครื่องประดับหัว');
     }
 
@@ -1208,29 +1298,143 @@ export class ArticulatedCharacter3D {
       this.tagPart(capeMesh, 'extra', 'cape_morph', 'ผ้าคลุมไหล่ (คลิกลากขึ้น/ลง = ปรับความยาวผ้าคลุม)');
     }
 
-    if (c.accessory && c.accessory !== 'none') {
+    const backFashion = c.fashionBack ?? (c.accessory === 'halo' ? 'none' : c.accessory);
+    const hasHalo = c.fashionHalo ?? c.accessory === 'halo';
+    if (backFashion && backFashion !== 'none') {
       const accGroup = new THREE.Group();
       torso.add(accGroup);
       this.bodyRenderGroups.push(accGroup);
-      if (c.accessory === 'angel_wings') {
-        const wingMat = createAnimeMaterial({ color: 0xf8fafc, emissive: 0x38bdf8, emissiveIntensity: 0.22 });
-        [-1, 1].forEach(side => {
-          for (let f = 0; f < 5; f++) {
-            const feather = createSculptableHairStrand([
-              [side * 0.11, upperLen * 0.75, -0.14],
-              [side * (0.38 + f * 0.09), upperLen * 0.90 - f * 0.09, -0.22],
-              [side * (0.64 + f * 0.07), upperLen * 0.54 - f * 0.14, -0.28]
-            ], 0.048, 0.010, wingMat);
-            accGroup.add(feather);
+      if (backFashion === 'angel_wings_white') {
+        const featherMats = [
+          new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x777777, emissiveIntensity: 0.18, roughness: 0.88, metalness: 0, side: THREE.DoubleSide }),
+          new THREE.MeshStandardMaterial({ color: 0xf1f5f9, emissive: 0x64748b, emissiveIntensity: 0.14, roughness: 0.9, metalness: 0, side: THREE.DoubleSide }),
+          new THREE.MeshStandardMaterial({ color: 0xdbeafe, emissive: 0x64748b, emissiveIntensity: 0.12, roughness: 0.88, metalness: 0, side: THREE.DoubleSide }),
+          new THREE.MeshStandardMaterial({ color: 0xfff7ed, emissive: 0x78716c, emissiveIntensity: 0.15, roughness: 0.86, metalness: 0, side: THREE.DoubleSide })
+        ];
+        const featherGeometry = createWingFeatherGeometry(1, 0.2, 0.035);
+        const featherOrder = [2, 1, 0, 3, 0, 1, 2];
+        [-1, 1].forEach((side) => {
+          const wingPivot = new THREE.Group();
+          wingPivot.position.set(side * 0.13, upperLen * 0.78, -0.19);
+          wingPivot.userData.wingSide = side;
+          const mirror = new THREE.Group();
+          mirror.scale.x = side;
+          wingPivot.add(mirror);
+
+          const featherFan = new THREE.Group();
+          featherFan.position.set(0.02, 0.02, 0);
+          mirror.add(featherFan);
+
+          for (let i = 0; i < featherOrder.length; i++) {
+            const fan = i / (featherOrder.length - 1);
+            const feather = new THREE.Mesh(featherGeometry, featherMats[featherOrder[i]]);
+            feather.scale.set(1.38 + fan * 0.34, 0.90 + fan * 0.22, 1);
+            feather.position.set(0.015 + fan * 0.055, 0.08 + fan * 0.16, -0.018 - (i % 2) * 0.006);
+            feather.rotation.z = 0.16 + fan * 0.47;
+            featherFan.add(feather);
           }
+
+          for (let i = 0; i < 6; i++) {
+            const fan = i / 5;
+            const cover = new THREE.Mesh(featherGeometry, featherMats[i % featherMats.length]);
+            cover.scale.set(0.92 + fan * 0.14, 0.64 + fan * 0.12, 1);
+            cover.position.set(0.015 + fan * 0.055, -0.055 + fan * 0.085, 0.045 + (i % 2) * 0.006);
+            cover.rotation.z = 0.12 + fan * 0.32;
+            mirror.add(cover);
+          }
+
+          const shoulderCover = new THREE.Mesh(new THREE.SphereGeometry(0.14, 16, 12), featherMats[0]);
+          shoulderCover.scale.set(1.0, 0.80, 0.34);
+          shoulderCover.position.set(0.02, -0.04, 0.065);
+          mirror.add(shoulderCover);
+
+          registerFashionMotion(wingPivot, 'wing', side * 0.65);
+          if (side === -1) this.joints.wingL = wingPivot;
+          else this.joints.wingR = wingPivot;
+          accGroup.add(wingPivot);
         });
-      } else if (c.accessory === 'halo') {
-        const halo = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.018, 10, 28), createAnimeMaterial({ color: 0xfef08a, emissive: 0xfacc15, emissiveIntensity: 0.55 }));
-        halo.rotation.x = Math.PI / 2;
-        halo.position.set(0, upperLen + 0.72, 0);
-        accGroup.add(halo);
+      } else if (backFashion === 'angel_wings') {
+        const wingMats = [
+          createAnimeMaterial({ color: 0x7c3aed, roughness: 0.46, metalness: 0.08, side: THREE.DoubleSide }),
+          createAnimeMaterial({ color: 0x38bdf8, roughness: 0.42, metalness: 0.06, side: THREE.DoubleSide }),
+          createAnimeMaterial({ color: 0xf0abfc, roughness: 0.44, metalness: 0.05, side: THREE.DoubleSide }),
+          createAnimeMaterial({ color: 0xfde68a, roughness: 0.48, metalness: 0.08, side: THREE.DoubleSide })
+        ];
+        const upperGeometry = createButterflyWingGeometry(0.88, 0.68, false, 0.045);
+        const lowerGeometry = createButterflyWingGeometry(0.70, 0.56, true, 0.045);
+        const eyespotGeometry = new THREE.CircleGeometry(0.105, 24);
+        const innerSpotGeometry = new THREE.CircleGeometry(0.066, 24);
+        const borderMat = createAnimeMaterial({ color: 0x312e81, roughness: 0.5, side: THREE.DoubleSide });
+        const innerLayerMats = [
+          createAnimeMaterial({ color: 0xc4b5fd, roughness: 0.44, side: THREE.DoubleSide }),
+          createAnimeMaterial({ color: 0x7dd3fc, roughness: 0.42, side: THREE.DoubleSide }),
+          createAnimeMaterial({ color: 0xf5d0fe, roughness: 0.44, side: THREE.DoubleSide }),
+          createAnimeMaterial({ color: 0xfef08a, roughness: 0.46, side: THREE.DoubleSide })
+        ];
+        const spotMat = createAnimeMaterial({ color: 0x1e1b4b, roughness: 0.42, side: THREE.DoubleSide });
+        const innerSpotMat = createAnimeMaterial({ color: 0xfef3c7, roughness: 0.38, side: THREE.DoubleSide });
+
+        [-1, 1].forEach((side) => {
+          const wingPivot = new THREE.Group();
+          wingPivot.position.set(side * 0.09, upperLen * 0.78, -0.15);
+          const wingMirror = new THREE.Group();
+          wingMirror.scale.x = side;
+          wingPivot.add(wingMirror);
+
+          const upperColorIndex = side === -1 ? 0 : 1;
+          const lowerColorIndex = side === -1 ? 2 : 3;
+          const addWingLayers = (geometry, materialIndex, scale, y, z) => {
+            const border = new THREE.Mesh(geometry, borderMat);
+            border.position.set(0, y, z);
+            border.scale.set(1.06, 1.05, 1);
+            wingMirror.add(border);
+
+            const mainLayer = new THREE.Mesh(geometry, wingMats[materialIndex]);
+            mainLayer.position.set(0, y, z + 0.026);
+            mainLayer.scale.set(scale, scale, 1);
+            wingMirror.add(mainLayer);
+
+            const innerLayer = new THREE.Mesh(geometry, innerLayerMats[materialIndex]);
+            innerLayer.position.set(0.015, y + (geometry === upperGeometry ? 0.025 : -0.02), z + 0.052);
+            innerLayer.scale.set(scale * 0.72, scale * 0.72, 1);
+            wingMirror.add(innerLayer);
+          };
+          addWingLayers(upperGeometry, upperColorIndex, 0.94, 0.02, 0);
+          addWingLayers(lowerGeometry, lowerColorIndex, 0.94, -0.035, 0.008);
+
+          const upperSpot = new THREE.Mesh(eyespotGeometry, spotMat);
+          upperSpot.position.set(0.62, 0.36, 0.085);
+          wingMirror.add(upperSpot);
+          const upperInnerSpot = new THREE.Mesh(innerSpotGeometry, innerSpotMat);
+          upperInnerSpot.position.set(0.62, 0.36, 0.088);
+          wingMirror.add(upperInnerSpot);
+
+          const lowerSpot = new THREE.Mesh(eyespotGeometry, spotMat);
+          lowerSpot.scale.setScalar(0.82);
+          lowerSpot.position.set(0.48, -0.42, 0.085);
+          wingMirror.add(lowerSpot);
+          const lowerInnerSpot = new THREE.Mesh(innerSpotGeometry, innerSpotMat);
+          lowerInnerSpot.scale.setScalar(0.82);
+          lowerInnerSpot.position.set(0.48, -0.42, 0.088);
+          wingMirror.add(lowerInnerSpot);
+
+          if (side === -1) {
+            this.joints.wingL = wingPivot;
+          } else {
+            this.joints.wingR = wingPivot;
+          }
+          accGroup.add(wingPivot);
+        });
       }
       this.tagPart(accGroup, 'extra', 'cape_morph', 'เครื่องประดับพิเศษ');
+    }
+    if (hasHalo) {
+      const halo = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.018, 10, 28), createAnimeMaterial({ color: 0xfef08a, emissive: 0xfacc15, emissiveIntensity: 0.55 }));
+      halo.rotation.x = Math.PI / 2;
+      halo.position.set(0, upperLen + 0.72, 0);
+      torso.add(halo);
+      registerFashionMotion(halo, 'halo');
+      this.tagPart(halo, 'extra', 'cape_morph', 'วงแหวนเทวทูต');
     }
 
     // ==================== 5. แขน ข้อศอก มือ และอาวุธที่จับในทิศทางพุ่งไปด้านหน้าอย่างถูกต้อง ====================
@@ -1396,7 +1600,25 @@ export class ArticulatedCharacter3D {
       return g;
     };
 
-    if (w.type === 'sword') {
+    if (w.type === 'gloves') {
+      [-1, 1].forEach((side) => {
+        const cuff = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.064, 0.055, 0.13, 12),
+          createAnimeMaterial({ color: 0x451a03, roughness: 0.72 })
+        );
+        cuff.position.y = -0.045;
+        const knuckle = new THREE.Mesh(
+          new THREE.SphereGeometry(0.09, 14, 12),
+          createAnimeMaterial({ color: w.color, metalness: 0.35, roughness: 0.38, emissive: w.color, emissiveIntensity: 0.08 })
+        );
+        knuckle.scale.set(1.05, 0.82, 1.18);
+        knuckle.position.set(0, 0.045, 0.035);
+        const glove = new THREE.Group();
+        glove.add(cuff, knuckle);
+        (side < 0 ? lSocket : rSocket).add(glove);
+        this.drawnWeaponMeshes.push(glove);
+      });
+    } else if (w.type === 'sword') {
       // ดาบในมือขวา
       const drawnSword = createSwordMesh();
       drawnSword.rotation.x = Math.PI * 0.68;
@@ -1565,7 +1787,9 @@ export class ArticulatedCharacter3D {
       this.toggleWeaponSheathe(false);
     }
     this.comboStep = step;
-    this.attackDuration = step === 3 ? 0.52 : 0.38;
+    this.attackDuration = this.currentWeaponType === 'gloves' && step === 4
+      ? 0.56
+      : step === 3 ? 0.52 : 0.38;
     this.attackTimer = this.attackDuration;
   }
 
@@ -1573,6 +1797,15 @@ export class ArticulatedCharacter3D {
     this.animTime += dt;
     const j = this.joints;
     if (!j.pelvis) return;
+    const frameTime = THREE.MathUtils.clamp(dt, 0, 0.05);
+    const targetTurnVelocity = frameTime > 0 ? turnDelta / frameTime : 0;
+    this.turnVelocity = THREE.MathUtils.damp(
+      this.turnVelocity || 0,
+      THREE.MathUtils.clamp(targetTurnVelocity, -5, 5),
+      9,
+      frameTime
+    );
+    const turnVelocity = this.turnVelocity;
 
     if (this.faceMat) {
       this.blinkTimer -= dt;
@@ -1622,7 +1855,7 @@ export class ArticulatedCharacter3D {
 
     if (j.cape) {
       j.cape.rotation.x = this.capeAngleX * 0.55 + Math.sin(this.animTime * 6.5) * (0.03 + speedRatio * 0.07);
-      j.cape.rotation.z = THREE.MathUtils.clamp(-turnDelta * 1.4, -0.35, 0.35);
+      j.cape.rotation.z = THREE.MathUtils.clamp(-turnVelocity * 0.023, -0.35, 0.35);
     }
 
     if (j.hairPhysics) {
@@ -1633,7 +1866,7 @@ export class ArticulatedCharacter3D {
         -0.04,
         0.38
       ) + Math.sin(this.animTime * 5.5) * (0.02 + speedRatio * 0.045);
-      j.hairPhysics.rotation.z = THREE.MathUtils.clamp(-turnDelta * 0.75, -0.22, 0.22);
+      j.hairPhysics.rotation.z = THREE.MathUtils.clamp(-turnVelocity * 0.0125, -0.22, 0.22);
     }
 
     for (let i = 0; i < this.hairSpringNodes.length; i++) {
@@ -1642,7 +1875,7 @@ export class ArticulatedCharacter3D {
       const wave = Math.sin(this.animTime * freq + hn.phaseOffset);
       const wave2 = Math.cos(this.animTime * (freq * 0.85) + hn.phaseOffset);
       hn.pivot.rotation.x = hn.baseRotX + (wave * 0.5 + 0.5) * hn.ampX * (0.35 + speedRatio * 1.15);
-      hn.pivot.rotation.z = hn.baseRotZ + wave2 * hn.ampZ * (0.35 + speedRatio * 0.85) - turnDelta * 0.25;
+      hn.pivot.rotation.z = hn.baseRotZ + wave2 * hn.ampZ * (0.35 + speedRatio * 0.85) - turnVelocity * 0.0042;
     }
 
     // ==================== ระบบดัดคลื่น S-Curve ระดับ Vertex ให้เส้นผมและผ้าคลุมพลิ้วไหวไม่แข็งเป็นเส้นตรง ====================
@@ -1711,7 +1944,7 @@ export class ArticulatedCharacter3D {
         // 3. พลิ้วส่ายซ้าย-ขวาและแผ่ปลายออกเมื่อวิ่งเร็ว
         const swayX = Math.cos(phase * 0.8) * (0.010 + windIntensity * 0.042) * Math.pow(t, 1.2);
         const flareX = ox * (windIntensity * (isCape ? 0.20 : 0.15) * tCurve);
-        const turnWhipX = THREE.MathUtils.clamp(-turnDelta * 0.45, -0.18, 0.18) * tCurve;
+        const turnWhipX = THREE.MathUtils.clamp(-turnVelocity * 0.0075, -0.18, 0.18) * tCurve;
 
         posAttr.setXYZ(
           i,
@@ -1723,10 +1956,12 @@ export class ArticulatedCharacter3D {
       posAttr.needsUpdate = true;
     }
 
-    this.leanAngleZ = THREE.MathUtils.lerp(this.leanAngleZ, THREE.MathUtils.clamp(-turnDelta * 1.8, -0.22, 0.22), dt * 10);
+    this.leanAngleZ = THREE.MathUtils.damp(this.leanAngleZ, THREE.MathUtils.clamp(-turnVelocity * 0.03, -0.22, 0.22), 10, frameTime);
 
     let state = this.animState;
-    if (this.attackTimer > 0) {
+    if (this.animState === 'death') {
+      state = 'death';
+    } else if (this.attackTimer > 0) {
       this.attackTimer -= dt;
       state = 'attack';
     } else if (isInWater) {
@@ -1760,7 +1995,23 @@ export class ArticulatedCharacter3D {
       j.legR.rotation.x = 0.28 * impactBell;
       j.shinR.rotation.x = 0.35 * impactBell;
 
-      if (wType === 'sword' || wType === 'shield') {
+      if (wType === 'gloves') {
+        const leftLead = this.comboStep === 2 || this.comboStep === 4;
+        const fastCross = this.comboStep === 3;
+        const lead = leftLead ? 'L' : 'R';
+        const other = lead === 'L' ? 'R' : 'L';
+        j.pelvis.rotation.y = (leftLead ? -1 : 1) * swingArc * 0.16;
+        j.torso.rotation.y = (leftLead ? -1 : 1) * swingArc * 0.18;
+        j.torso.rotation.x = -0.08 * impactBell;
+        j[`arm${lead}`].rotation.set(-0.28 - impactBell * (fastCross ? 1.25 : 1.05), (leftLead ? -1 : 1) * 0.12, (leftLead ? 1 : -1) * 0.2);
+        j[`foreArm${lead}`].rotation.set(-0.24 - impactBell * 0.18, 0, 0);
+        j[`arm${other}`].rotation.set(-0.55 - impactBell * (fastCross ? 0.9 : 0.12), 0, (leftLead ? -1 : 1) * 0.16);
+        j[`foreArm${other}`].rotation.set(-0.25, 0, 0);
+        if (this.comboStep === 4) {
+          j.pelvis.position.z = impactBell * 0.14;
+          j.legR.rotation.x = -0.5 * impactBell;
+        }
+      } else if (wType === 'sword' || wType === 'shield') {
         if (this.slashTrailMesh) {
           this.slashTrailMesh.visible = p > 0.16 && p < 0.86;
           this.slashTrailMesh.material.opacity = Math.sin(((p - 0.16) / 0.70) * Math.PI) * 0.82;
@@ -1830,6 +2081,22 @@ export class ArticulatedCharacter3D {
           j.foreArmL.rotation.set(-0.25, 0, 0);
         }
       }
+    } else if (state === 'death') {
+      this.deathProgress = Math.min(1, (this.deathProgress || 0) + dt * 1.15);
+      const fall = this.deathProgress * this.deathProgress * (3 - 2 * this.deathProgress);
+      j.pelvis.position.y = THREE.MathUtils.lerp(j.pelvis.position.y, basePelvisY - 0.32 * fall, blend);
+      lerpEuler(j.pelvis.rotation, 0.18 * fall, 0, -0.3 * fall, blend);
+      if (j.waist) lerpEuler(j.waist.rotation, 0.72 * fall, 0, -0.12 * fall, blend);
+      lerpEuler(j.torso.rotation, 0.92 * fall, 0, -0.16 * fall, blend);
+      lerpEuler(j.head.rotation, 0.68 * fall, 0, 0.12 * fall, blend);
+      lerpEuler(j.legL.rotation, -0.55 * fall, 0, -0.18 * fall, blend);
+      lerpEuler(j.shinL.rotation, 0.9 * fall, 0, 0, blend);
+      lerpEuler(j.legR.rotation, 0.28 * fall, 0, 0.16 * fall, blend);
+      lerpEuler(j.shinR.rotation, 0.55 * fall, 0, 0, blend);
+      lerpEuler(j.armL.rotation, -0.25 * fall, 0, -0.82 * fall, blend);
+      lerpEuler(j.foreArmL.rotation, -0.35 * fall, 0, 0, blend);
+      lerpEuler(j.armR.rotation, -0.35 * fall, 0, 0.78 * fall, blend);
+      lerpEuler(j.foreArmR.rotation, -0.25 * fall, 0, 0, blend);
     } else if (state === 'sleep') {
       j.pelvis.position.y = THREE.MathUtils.lerp(j.pelvis.position.y, 0.56, blend);
       lerpEuler(j.pelvis.rotation, -Math.PI / 2, 0, 0, blend);
@@ -1868,7 +2135,8 @@ export class ArticulatedCharacter3D {
       j.legR.rotation.x = -Math.sin(t * 1.5) * 0.48;
       j.shinR.rotation.x = 0.35 + Math.max(0, -Math.cos(t * 1.5) * 0.4);
     } else if (state === 'sit') {
-      j.pelvis.position.y = THREE.MathUtils.lerp(j.pelvis.position.y, 0.52, blend);
+      const seatedPelvisY = Number.isFinite(this.sitPelvisY) ? this.sitPelvisY : 0.64;
+      j.pelvis.position.y = THREE.MathUtils.lerp(j.pelvis.position.y, seatedPelvisY, blend);
       lerpEuler(j.pelvis.rotation, 0, 0, 0, blend);
       if (j.waist) lerpEuler(j.waist.rotation, 0.04, 0, 0, blend);
       lerpEuler(j.torso.rotation, 0.02 + Math.sin(this.animTime * 2.0) * 0.015, 0, 0, blend);
